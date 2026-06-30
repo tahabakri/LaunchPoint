@@ -1,0 +1,29 @@
+{
+  "_comment": "Example input for `launchpoint run --sightings examples/sightings_zurich.json --out origin.tif`. Each sighting is a fuzzy ground-position snapshot of the same drone: position good to a couple hundred metres, altitude a rough AGL guess. Coordinates are near Zurich, Switzerland.",
+  "sightings": [
+    {
+      "label": "north pass",
+      "lat": 47.3905,
+      "lon": 8.5510,
+      "altitude": 110.0,
+      "position_sigma_m": 200.0,
+      "altitude_sigma_m": 25.0
+    },
+    {
+      "label": "east pass",
+      "lat": 47.3802,
+      "lon": 8.5720,
+      "altitude": 95.0,
+      "position_sigma_m": 250.0,
+      "altitude_sigma_m": 30.0
+    },
+    {
+      "label": "south pass",
+      "lat": 47.3701,
+      "lon": 8.5505,
+      "altitude": 130.0,
+      "position_sigma_m": 220.0,
+      "altitude_sigma_m": 25.0
+    }
+  ]
+}
