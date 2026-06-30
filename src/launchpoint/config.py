@@ -109,6 +109,15 @@ class Config:
       still show. Most forgiving of a bad sighting, but blurriest.
     """
 
+    canopy_source: str = "eth"
+    """Which global canopy-height product to fetch (Phase 4).
+
+    * ``"eth"`` (default) — ETH Sentinel-2 10 m (2020). Much faster to download;
+      a smoothed 10 m canopy-top height.
+    * ``"meta"`` — Meta/WRI 1 m. Per-tree detail for fine occlusion near the
+      observer, at a large download cost.
+    """
+
     altitude_is_agl: bool = True
     """If True, Sighting.altitude is metres above ground at the drone's position;
     converted to absolute (ASL) by adding the surface elevation under the drone.
@@ -128,3 +137,5 @@ class Config:
         # unless the caller explicitly customised the range model.
         if self.range_model.max_range_m == DEFAULT_MAX_RANGE_M:
             self.range_model.max_range_m = self.max_range_m
+        if self.canopy_source not in ("eth", "meta"):
+            self.canopy_source = "eth"

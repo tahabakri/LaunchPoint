@@ -12,6 +12,7 @@ import {
   rasterValueAt,
 } from "./rendering.js";
 import { TerrainScene } from "./terrain3d.js";
+import { castViewshedFan, observerElevation } from "./raycast.js";
 
 const OSM_TEMPLATE = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 const DEFAULT_STAGES = ["Prepare AOI", "Fetch surfaces", "Run fusion", "Serialize result", "Export ready"];
@@ -74,6 +75,7 @@ function cacheElements() {
     "antennaInput",
     "gpuInput",
     "canopyInput",
+    "canopySourceSelect",
     "buildingsInput",
     "cacheInput",
     "runButton",
@@ -388,6 +390,9 @@ function renderMarkers() {
   state.overlays.markers = group;
 }
 
+const RAY_VISIBLE_STYLE = { color: "#55d6c2", weight: 1, opacity: 0.5 };
+const RAY_OCCLUDED_STYLE = { color: "#f0655a", weight: 1, opacity: 0.16 };
+
 function renderRays() {
   if (state.overlays.rays) {
     state.map.removeLayer(state.overlays.rays);
@@ -399,32 +404,81 @@ function renderRays() {
   }
   const sighting = state.sightings[state.selectedSighting];
   if (!isFiniteSighting(sighting)) return;
+
   const group = L.layerGroup();
-  const origin = [sighting.lat, sighting.lon];
-  const target = state.selectedCell || state.analysis?.mostLikely;
+  const origin = { lat: sighting.lat, lon: sighting.lon };
+  const maxRange = Number(el.maxRangeInput.value) || 12000;
 
-  if (mode === "fan") {
-    L.circle(origin, {
-      radius: Number(el.maxRangeInput.value),
-      color: "#55d6c2",
-      weight: 1,
-      opacity: 0.55,
-      fillColor: "#55d6c2",
-      fillOpacity: 0.035,
-    }).addTo(group);
-  }
+  // Max-range boundary so the fan reads as bounded even where it's all visible.
+  L.circle([origin.lat, origin.lon], {
+    radius: maxRange,
+    color: "#55d6c2",
+    weight: 1,
+    opacity: 0.4,
+    fill: false,
+    dashArray: "4 6",
+  }).addTo(group);
 
-  if ((mode === "selected" || mode === "profile") && target) {
-    L.polyline([origin, [target.lat, target.lon]], {
-      color: mode === "profile" ? "#f0b54d" : "#55d6c2",
-      weight: mode === "profile" ? 3 : 2,
-      opacity: 0.86,
-      dashArray: mode === "profile" ? "8 7" : "none",
-    }).addTo(group);
+  const dsm = state.analysis?.surfaceLayers?.dsm;
+  if (dsm) {
+    const ground = state.analysis?.surfaceLayers?.bareEarth || dsm;
+    const observerZ = observerElevation(dsm, origin.lat, origin.lon, sighting.altitude || 0);
+    const targetHeight = Number(el.antennaInput.value) || 1.5;
+    const fan = castViewshedFan({
+      dsm,
+      ground,
+      origin,
+      observerZ,
+      targetHeight,
+      maxRange,
+      rayCount: 96,
+    });
+    drawRayFan(group, origin, fan);
+  } else {
+    // No analysis yet: preview the cast geometry as faint uniform spokes.
+    drawPreviewFan(group, origin, maxRange);
   }
 
   group.addTo(state.map);
   state.overlays.rays = group;
+}
+
+// Draw each ray as polylines split into visible/occluded runs.
+function drawRayFan(group, origin, fan) {
+  const start = [origin.lat, origin.lon];
+  fan.rays.forEach((ray) => {
+    if (!ray.points.length) return;
+    let runVisible = ray.points[0].visible;
+    let coords = [start];
+    ray.points.forEach((p) => {
+      if (p.visible !== runVisible) {
+        L.polyline(coords, runVisible ? RAY_VISIBLE_STYLE : RAY_OCCLUDED_STYLE).addTo(group);
+        coords = [coords[coords.length - 1]]; // bridge the gap, no hole
+        runVisible = p.visible;
+      }
+      coords.push([p.lat, p.lon]);
+    });
+    if (coords.length > 1) {
+      L.polyline(coords, runVisible ? RAY_VISIBLE_STYLE : RAY_OCCLUDED_STYLE).addTo(group);
+    }
+  });
+}
+
+function drawPreviewFan(group, origin, maxRange) {
+  const lat0 = origin.lat;
+  const lon0 = origin.lon;
+  const mPerDegLat = 111320;
+  const mPerDegLon = 111320 * Math.cos((lat0 * Math.PI) / 180);
+  for (let i = 0; i < 48; i += 1) {
+    const az = (i / 48) * Math.PI * 2;
+    const lat = lat0 + (maxRange * Math.cos(az)) / mPerDegLat;
+    const lon = lon0 + (maxRange * Math.sin(az)) / mPerDegLon;
+    L.polyline([[lat0, lon0], [lat, lon]], {
+      color: "#55d6c2",
+      weight: 1,
+      opacity: 0.12,
+    }).addTo(group);
+  }
 }
 
 function clearRasterOverlays() {
@@ -600,6 +654,7 @@ function readSettings() {
     antenna_height_m: Number(el.antennaInput.value),
     prefer_gpu: el.gpuInput.checked,
     use_canopy: el.canopyInput.checked,
+    canopy_source: el.canopySourceSelect.value,
     use_buildings: el.buildingsInput.checked,
     use_cache: el.cacheInput.checked,
   };
@@ -619,7 +674,7 @@ function updateResults() {
     ${metadataRow("AOI", aoi.widthM ? `${formatMeters(aoi.widthM)} x ${formatMeters(aoi.heightM)}` : "-")}
     ${metadataRow("Grid cells", aoi.cells ? `${aoi.cells.toLocaleString()} @ ${formatMeters(aoi.resolutionM)}` : "-")}
     ${metadataRow("DSM", layers.dsm ? "loaded" : "missing")}
-    ${metadataRow("Canopy", layers.canopyHeight ? "loaded" : "not available")}
+    ${metadataRow("Canopy", layers.canopyHeight ? `loaded (${analysis.metadata.canopySource === "meta" ? "Meta 1 m" : "ETH 10 m"})` : "not available")}
     ${metadataRow("Buildings", layers.buildingHeight ? "loaded" : "not available")}
     ${metadataRow("Cache", analysis.metadata.cacheDir)}
   `;

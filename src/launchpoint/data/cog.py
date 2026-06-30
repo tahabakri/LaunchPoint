@@ -48,8 +48,17 @@ def _vsi_url(url: str) -> str:
 
 
 @contextlib.contextmanager
-def gdal_env():
-    with rasterio.Env(**_GDAL_ENV):
+def gdal_env(overrides: dict[str, str | None] | None = None):
+    """Open a GDAL config scope. ``overrides`` patches ``_GDAL_ENV``; a value of
+    ``None`` *removes* that key (some hosts need a default GDAL setting unset)."""
+    cfg = dict(_GDAL_ENV)
+    if overrides:
+        for key, value in overrides.items():
+            if value is None:
+                cfg.pop(key, None)
+            else:
+                cfg[key] = value
+    with rasterio.Env(**cfg):
         yield
 
 
@@ -94,6 +103,7 @@ def mosaic_cogs_onto(
     max_workers: int = DEFAULT_MAX_WORKERS,
     reporter: FetchReporter | None = None,
     layer: str = "",
+    gdal_env_overrides: dict[str, str | None] | None = None,
 ) -> RasterGrid:
     """Mosaic several COG tiles onto ``target``, filling gaps tile by tile.
 
@@ -111,7 +121,7 @@ def mosaic_cogs_onto(
 
     def _fetch(index: int, url: str) -> tuple[int, np.ndarray | None, float]:
         start = time.perf_counter()
-        with gdal_env():
+        with gdal_env(gdal_env_overrides):
             try:
                 arr = reproject_cog_onto(url, target, resampling=resampling)
             except rasterio.errors.RasterioIOError:

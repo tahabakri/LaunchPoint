@@ -83,6 +83,24 @@ def test_reachable_footprint_is_a_proper_subset():
     assert not mask.all()
 
 
+def test_min_footprint_is_the_intersection_not_the_union():
+    sc = make_default_scenario(n_sightings=4, seed=5)
+    inter = reachable_footprint(
+        sc.sightings, sc.surface, Config(combine="min"), sc.projector
+    )
+    union = reachable_footprint(
+        sc.sightings, sc.surface, Config(combine="arithmetic_mean"), sc.projector
+    )
+    # Strict-min gates canopy to the common region, a subset of the union — so
+    # it can only ever fetch *less* canopy than the union footprint.
+    assert inter.sum() < union.sum()
+    assert (union | inter).sum() == union.sum()  # intersection ⊆ union
+    # The common region is still non-empty (the planted controller is in it).
+    assert inter.any()
+    cr, cc = sc.controller_pixel()
+    assert inter[cr, cc]
+
+
 def test_footprint_gated_fetch_only_fills_inside_footprint(monkeypatch):
     sc = make_default_scenario(n_sightings=4, seed=5)
     occluder = sc.surface

@@ -107,26 +107,45 @@ def reachable_footprint(
     range_model: RangeModel | None = None,
     dilate_m: float | None = None,
     threshold: float = 1e-3,
+    intersect: bool | None = None,
 ) -> np.ndarray:
-    """Boolean mask of cells any sighting can plausibly reach on the bare DSM.
+    """Boolean mask of cells that can carry a non-zero final heatmap value.
 
-    This is the cheap "where could the rays land at all?" pass used to gate the
-    expensive high-resolution canopy fetch (N2). It runs one nominal viewshed
-    per sighting against the **DSM alone** (no canopy, no bare earth), so the
-    result is a strict *superset* of the true canopy-aware reachable set: adding
-    canopy only ever raises the occluder and *shrinks* a viewshed, never grows
-    it. Fetching canopy only inside this mask therefore can never miss a cell
-    that canopy would have revealed.
+    The cheap "where could the rays land?" pass that gates the expensive 1 m
+    canopy fetch (N2). It runs one viewshed per sighting against the **DSM alone**
+    (no canopy, no bare earth), then combines the per-sighting masks **the same
+    way the heatmap combines the sightings**:
 
-    ``dilate_m`` grows the mask by that many metres to absorb Monte-Carlo
-    position jitter and ray slop (the real fusion samples observer positions
-    around each nominal point).
+    * ``intersect=True`` (the default whenever ``config.combine == "min"``) —
+      AND the masks. With a strict min, a cell is only viable if *every* sighting
+      can see it, so canopy is only needed in the **intersection** of the
+      viewsheds — a much smaller area than the union, and the real download win.
+    * otherwise — OR the masks (union), since ``geometric_mean`` /
+      ``arithmetic_mean`` keep cells only some sightings can reach.
+
+    Correctness: each per-sighting DSM-only mask is a *superset* of that
+    sighting's true canopy-aware contribution (canopy only lowers the antenna
+    target and so can only shrink visibility), and we additionally lift the
+    observer by ~2σ of its altitude uncertainty and dilate by ``dilate_m`` for
+    position jitter. So the combined mask is a safe superset of the final
+    non-zero region under either combine rule — canopy is fetched everywhere the
+    heatmap could possibly be non-zero, and nowhere it can't.
     """
     range_model = range_model or RangeModel(config.range_model)
-    mask = np.zeros(occluder.shape, dtype=bool)
+    if intersect is None:
+        intersect = config.combine == "min"
+
+    rad = 0
+    if dilate_m and dilate_m > 0:
+        rad = max(1, int(round(dilate_m / occluder.res_x)))
+
+    combined: np.ndarray | None = None
     for s in sightings:
         nx, ny = projector.to_utm(s.lon, s.lat)
-        oz = _observer_z(occluder, nx, ny, s.altitude, config.altitude_is_agl)
+        # Lift the observer by ~2σ of altitude: a higher drone sees more, so this
+        # keeps the per-sighting mask a superset w.r.t. altitude uncertainty.
+        alt = s.altitude + 2.0 * s.altitude_sigma_m
+        oz = _observer_z(occluder, nx, ny, alt, config.altitude_is_agl)
         vi = ViewshedInput(
             occluder=occluder,
             observer_xy=(nx, ny),
@@ -136,14 +155,20 @@ def reachable_footprint(
             refraction=True,
         )
         vs = compute_viewshed(vi, range_model, prefer_gpu=config.prefer_gpu)
-        mask |= np.nan_to_num(vs.data) > threshold
+        mask = np.nan_to_num(vs.data) > threshold
+        if rad and mask.any():
+            from scipy import ndimage
 
-    if dilate_m and dilate_m > 0 and mask.any():
-        from scipy import ndimage
-
-        rad = max(1, int(round(dilate_m / occluder.res_x)))
-        mask = ndimage.binary_dilation(mask, iterations=rad)
-    return mask
+            # Dilate per sighting *before* combining so an intersection still
+            # covers cells each sighting reaches only under position jitter.
+            mask = ndimage.binary_dilation(mask, iterations=rad)
+        if combined is None:
+            combined = mask
+        elif intersect:
+            combined &= mask
+        else:
+            combined |= mask
+    return combined if combined is not None else np.zeros(occluder.shape, dtype=bool)
 
 
 def combine_contributions(

@@ -60,40 +60,60 @@ def _mask_bbox(mask: np.ndarray, grid: RasterGrid) -> BBox:
     return BBox(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
 
 
+def _canopy_fetcher(source: str):
+    """Resolve the canopy fetch function for a configured source.
+
+    Both fetchers share the ``(target, projector, cache_dir=None, reporter=None)``
+    signature so the footprint-gating logic below is source-agnostic.
+    """
+    if source == "eth":
+        from launchpoint.data.eth_canopy import fetch_canopy_height_eth
+
+        return fetch_canopy_height_eth
+    from launchpoint.data.canopy import fetch_canopy_height
+
+    return fetch_canopy_height
+
+
 def _fetch_canopy_in_footprint(
     occluder: RasterGrid,
     projector: Projector,
     cache_dir: str | None,
     footprint: np.ndarray | None,
     reporter: FetchReporter | None = None,
+    fetcher=None,
 ) -> RasterGrid:
-    """Fetch the 1 m canopy, restricted to ``footprint`` when it helps (N2).
+    """Fetch the canopy, restricted to ``footprint`` when it helps (N2).
 
     Canopy only matters where a controller could actually stand (the reachable
-    footprint); cells outside it never enter the result. So we fetch high-res
-    canopy only over the footprint's bounding box and leave the rest NaN
-    (treated as 0 downstream). With the canopy tiles stored as full-width
-    single-row strips, shrinking the read window's row span is exactly what cuts
-    the bytes pulled over the network.
+    footprint); cells outside it never enter the result. So we fetch canopy only
+    over the footprint's bounding box and leave the rest NaN (treated as 0
+    downstream) — shrinking the read window is exactly what cuts the bytes pulled
+    over the network (especially for the Meta tiles' full-width row strips).
+
+    ``fetcher`` selects the source; it defaults to the Meta/WRI 1 m product.
     """
-    from launchpoint.data.canopy import fetch_canopy_height
+    if fetcher is None:
+        from launchpoint.data.canopy import fetch_canopy_height
+
+        fetcher = fetch_canopy_height
 
     if footprint is None or not footprint.any():
-        return fetch_canopy_height(occluder, projector, cache_dir, reporter=reporter)
+        return fetcher(occluder, projector, cache_dir, reporter=reporter)
 
     coverage = float(footprint.mean())
     if coverage >= _FOOTPRINT_FULL_FRAC:
         log.info(
             "canopy footprint covers %.0f%% of AOI — fetching full window", coverage * 100
         )
-        return fetch_canopy_height(occluder, projector, cache_dir, reporter=reporter)
+        return fetcher(occluder, projector, cache_dir, reporter=reporter)
 
     sub = occluder.subgrid(_mask_bbox(footprint, occluder))
     log.info(
         "canopy footprint gate: %.0f%% of AOI -> %d x %d cell window (rows %d->%d span)",
         coverage * 100, sub.rows, sub.cols, occluder.rows, sub.rows,
     )
-    sub_canopy = fetch_canopy_height(sub, projector, cache_dir, reporter=reporter)
+    sub_canopy = fetcher(sub, projector, cache_dir, reporter=reporter)
 
     full = occluder.like(fill=np.nan)
     r0, c0 = occluder.world_to_pixel(sub.bounds.minx, sub.bounds.maxy)
@@ -125,10 +145,13 @@ def build_surface_stack(
     epsg = projector.utm_crs.to_epsg()
     res = config.coarse_resolution_m
     cache = Cache(config.cache_dir)
+    # The DSM is source-independent; bare earth and launch weight are derived
+    # from the canopy, so they must not be shared across canopy sources.
+    src = config.canopy_source
     keys = {
         "occluder": cache_key("dsm", bbox, epsg, res),
-        "ground": cache_key("bare_earth", bbox, epsg, res),
-        "launch": cache_key("launch_weight", bbox, epsg, res),
+        "ground": cache_key(f"bare_earth_{src}", bbox, epsg, res),
+        "launch": cache_key(f"launch_weight_{src}", bbox, epsg, res),
     }
 
     if use_cache and all(cache.has(k) for k in keys.values()):
@@ -168,7 +191,8 @@ def build_surface_stack(
                 )
             t0 = time.perf_counter()
             canopy = _fetch_canopy_in_footprint(
-                occluder, projector, config.cache_dir, footprint, reporter=reporter
+                occluder, projector, config.cache_dir, footprint, reporter=reporter,
+                fetcher=_canopy_fetcher(config.canopy_source),
             )
             reporter.layer_done("canopy", time.perf_counter() - t0)
         except Exception as exc:  # noqa: BLE001 - best-effort layer

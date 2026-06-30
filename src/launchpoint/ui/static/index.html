@@ -90,6 +90,13 @@
               <span>m</span>
             </div>
           </label>
+          <label class="field">
+            <span>Canopy source</span>
+            <select id="canopySourceSelect" class="select-control" aria-label="Canopy source">
+              <option value="eth">ETH 10 m — fast (default)</option>
+              <option value="meta">Meta 1 m — detailed, slow</option>
+            </select>
+          </label>
           <div class="toggle-stack">
             <label class="toggle-line">
               <input id="gpuInput" type="checkbox" checked />
@@ -129,9 +136,7 @@
             <button class="layer-toggle active" data-layer="sightings" type="button">Sightings</button>
             <select id="rayModeSelect" class="select-control" aria-label="Ray mode">
               <option value="off">Rays off</option>
-              <option value="selected">Selected rays</option>
-              <option value="fan">Viewshed fan</option>
-              <option value="profile">Profile</option>
+              <option value="fan">Viewshed rays</option>
             </select>
           </div>
         </div>

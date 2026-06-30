@@ -179,6 +179,9 @@ def _config_from_payload(payload: dict) -> tuple[Config, dict]:
     combine = str(settings.get("combine", "min"))
     if combine not in ("min", "geometric_mean", "arithmetic_mean"):
         combine = "min"
+    canopy_source = str(settings.get("canopy_source", "eth"))
+    if canopy_source not in ("eth", "meta"):
+        canopy_source = "eth"
 
     config = Config(
         max_range_m=max_range_m,
@@ -186,6 +189,7 @@ def _config_from_payload(payload: dict) -> tuple[Config, dict]:
         prefer_gpu=prefer_gpu,
         cache_dir=cache_dir,
         combine=combine,
+        canopy_source=canopy_source,
         monte_carlo=MonteCarloConfig(samples_per_sighting=samples),
     )
     layer_flags = {
@@ -491,6 +495,7 @@ def _run_analysis(payload: dict, job: RunJob | None = None) -> tuple[str, RunRec
     metadata = {
         "samples": config.monte_carlo.samples_per_sighting,
         "combine": config.combine,
+        "canopySource": config.canopy_source,
         "maxRangeM": config.max_range_m,
         "gpuMode": "gpu-preferred" if config.prefer_gpu else "cpu",
         "cacheDir": config.cache_dir,

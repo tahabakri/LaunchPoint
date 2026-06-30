@@ -108,11 +108,23 @@ The 1 m Meta/WRI canopy is the bandwidth-heavy layer (its tiles are full-width
 single-row strips with no overviews, so a naïve windowed read of the whole range
 disk can pull ~1 GB). Canopy only matters where a controller could actually
 stand, so LaunchPoint first runs a cheap **bare-DSM viewshed** per sighting to
-find the *reachable footprint* — the cells any ray can land on — then fetches
-high-resolution canopy **only inside that footprint's bounding box**. This is
-lossless: adding canopy can only ever *shrink* a viewshed (it raises the
-occluder), so the DSM-only footprint is a strict superset of the true
-canopy-aware one — fetching canopy outside it would never change the answer.
+find the *reachable footprint*, then fetches high-resolution canopy **only inside
+that footprint's bounding box**.
+
+Crucially, the footprint is combined the **same way the heatmap is**. Under the
+default strict `min`, a viable launch point must be seen by *every* drone, so
+canopy is only needed in the **intersection** of the per-sighting viewsheds — not
+their union. That is a much smaller area (roughly half the AOI even on flat
+synthetic terrain, far less where terrain occludes), and it falls out of the same
+single-launch-point assumption that drives the heatmap. The softer `geometric_mean`
+/ `arithmetic_mean` modes fall back to the union, since they keep cells only some
+drones reach.
+
+This stays lossless: each per-sighting DSM-only viewshed is a superset of its true
+canopy-aware contribution (canopy only lowers the antenna target, shrinking
+visibility), and the footprint additionally lifts the observer by ~2σ of altitude
+and dilates for position jitter — so canopy is fetched everywhere the heatmap
+could be non-zero and nowhere it can't.
 
 ---
 
