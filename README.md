@@ -15,8 +15,8 @@ propagates the (large) input uncertainty with Monte Carlo to produce a
 > When a drone broadcasts Remote ID, the operator location is already known — this
 > is the tool for when it *isn't*.
 
-This repository implements **Phases 0–5** of the project roadmap (core science and
-performance). The interactive web UI (Phase 6) is intentionally **not** built yet.
+This repository implements **Phases 0–6** of the project roadmap: core science,
+performance, and the first interactive command-center workspace.
 
 ---
 
@@ -28,6 +28,7 @@ performance). The interactive web UI (Phase 6) is intentionally **not** built ye
 install_dependencies.bat
 .venv\Scripts\activate
 launchpoint demo --out demo_origin.tif
+launchpoint ui
 ```
 
 The installer finds a compatible Python (3.10–3.12), creates a `.venv`, and
@@ -58,6 +59,24 @@ On first run this fetches only the data your area needs (Copernicus DSM, plus
 canopy and OSM buildings) over keyless HTTPS, caches it under `data_cache/`, and
 writes a GeoTIFF probability raster. No account or API key is required for any
 data source.
+
+### Interactive workspace
+
+```bash
+launchpoint ui --host 127.0.0.1 --port 8765
+```
+
+Open `http://127.0.0.1:8765` in a browser. The workspace starts as a blank
+operational map. Add sightings directly on the map or import JSON/CSV matching
+the existing sighting schema, then run the analysis and inspect the 2D heatmap,
+50% credible region, linked 3D terrain view, per-sighting contributions, cell
+diagnostics, and exports.
+
+The 2D base map uses OpenStreetMap public tiles with attribution. The 3D terrain
+view decodes keyless Terrarium elevation PNG tiles from the AWS Open Data
+Terrain Tiles bucket and drapes the same probability heatmap palette used by the
+2D viewport and PNG preview. GeoTIFF export is served from the full backend
+probability raster.
 
 ---
 
@@ -97,7 +116,8 @@ src/launchpoint/
                        #   derived bare earth, on-disk cache, surface stack
   synthetic/           # the validation harness
   pipeline.py          # sightings in -> OriginEstimate out
-  cli.py               # `launchpoint run` / `launchpoint demo`
+  ui/                  # Phase 6 browser workspace and shared overlay renderer
+  cli.py               # `launchpoint run` / `launchpoint demo` / `launchpoint ui`
 tests/                 # 32 offline tests + network-gated data tests
 ```
 
@@ -162,8 +182,7 @@ gets *wider*, not *wrong*, as input uncertainty grows.
 
 ## Status
 
-Phases 0–5 are implemented and tested. **Phase 6 (interactive web UI/UX) is not
-started** pending separate design direction; Phase 7 (release polish) follows.
+Phases 0–6 are implemented and tested. Phase 7 (release polish) follows.
 
 ## License
 

@@ -15,6 +15,7 @@ Two principles from the roadmap:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 
@@ -24,6 +25,8 @@ from launchpoint.core.grid import RasterGrid
 from launchpoint.core.sighting import Sighting
 from launchpoint.viewshed.core import ViewshedInput, compute_viewshed
 from launchpoint.viewshed.range_model import RangeModel
+
+ProgressCallback = Callable[[str, str, str, dict | None], None]
 
 
 @dataclass
@@ -102,6 +105,7 @@ def fuse_sightings(
     projector: Projector,
     ground: RasterGrid | None = None,
     launch_weight: RasterGrid | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> FusionResult:
     """Fuse all sightings into a single probability heatmap.
 
@@ -119,6 +123,14 @@ def fuse_sightings(
     per_sighting: list[RasterGrid] = []
     accum = np.zeros(occluder.shape, dtype=np.float64)
     for idx, s in enumerate(sightings):
+        if progress_callback is not None:
+            label = s.label or f"S{idx + 1}"
+            progress_callback(
+                "Run fusion",
+                "running",
+                f"Computing viewshed {idx + 1} of {len(sightings)} ({label})",
+                {"current": idx + 1, "total": len(sightings), "label": label},
+            )
         # Independent, reproducible stream per sighting.
         rng = np.random.default_rng(None if seed is None else seed + idx)
         contrib = monte_carlo_sighting(
@@ -133,6 +145,14 @@ def fuse_sightings(
     if launch_weight is not None:
         w = np.where(np.isfinite(launch_weight.data), launch_weight.data, 1.0)
         prob = prob * w
+
+    if progress_callback is not None:
+        progress_callback(
+            "Run fusion",
+            "complete",
+            f"Fused {len(sightings)} sighting(s)",
+            {"current": len(sightings), "total": len(sightings)},
+        )
 
     return FusionResult(
         probability=occluder.copy_with(prob.astype(np.float32)),

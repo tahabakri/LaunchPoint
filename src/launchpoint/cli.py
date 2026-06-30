@@ -98,6 +98,13 @@ def _cmd_demo(args) -> int:
     return 0
 
 
+def _cmd_ui(args) -> int:
+    from launchpoint.ui.server import run_ui_server
+
+    run_ui_server(host=args.host, port=args.port)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="launchpoint", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -119,6 +126,11 @@ def build_parser() -> argparse.ArgumentParser:
     pd.add_argument("--sightings-count", type=int, default=4)
     pd.add_argument("--seed", type=int, default=5)
     pd.set_defaults(func=_cmd_demo)
+
+    pu = sub.add_parser("ui", help="serve the Phase 6 browser workspace")
+    pu.add_argument("--host", default="127.0.0.1")
+    pu.add_argument("--port", type=int, default=8765)
+    pu.set_defaults(func=_cmd_ui)
 
     return p
 

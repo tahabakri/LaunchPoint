@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LaunchPoint Workspace</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIINfQ8xVI8ccu3lZXbV2qjvRyHAdE/p7n0="
+      crossorigin=""
+    />
+    <link rel="stylesheet" href="/styles.css?v=leaflet-fallback-1" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="rail rail-left" aria-label="Sightings and analysis controls">
+        <header class="brand">
+          <div class="brand-mark" aria-hidden="true">LP</div>
+          <div>
+            <h1>LaunchPoint</h1>
+            <p>Controller-origin workspace</p>
+          </div>
+        </header>
+
+        <section class="panel-section">
+          <div class="section-head">
+            <h2>Sightings</h2>
+            <span id="sightingCount" class="count-pill">0</span>
+          </div>
+          <div class="action-row">
+            <button id="addPinButton" class="control-button primary" type="button">
+              <i data-lucide="map-pin-plus"></i>
+              <span>Add pin</span>
+            </button>
+            <button id="importButton" class="control-button" type="button">
+              <i data-lucide="upload"></i>
+              <span>Import</span>
+            </button>
+            <button id="clearButton" class="icon-button danger" type="button" title="Clear sightings">
+              <i data-lucide="trash-2"></i>
+            </button>
+            <input id="fileInput" type="file" accept=".json,.csv,application/json,text/csv" hidden />
+          </div>
+          <div id="sightingList" class="sighting-list"></div>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-head">
+            <h2>Analysis</h2>
+          </div>
+          <label class="field">
+            <span>Max range</span>
+            <div class="input-with-unit">
+              <input id="maxRangeInput" type="number" min="500" step="500" value="12000" />
+              <span>m</span>
+            </div>
+          </label>
+          <button id="runButton" class="run-button" type="button">
+            <i data-lucide="radar"></i>
+            <span>Run analysis</span>
+          </button>
+          <div id="runProgress" class="run-progress" hidden>
+            <div id="runProgressBar" class="run-progress-bar"></div>
+          </div>
+          <p id="runMessage" class="status-message">Add a sighting or import a file.</p>
+        </section>
+
+        <details class="panel-section disclosure">
+          <summary>
+            <span>Advanced</span>
+            <i data-lucide="chevron-down"></i>
+          </summary>
+          <label class="field">
+            <span>Monte Carlo samples</span>
+            <input id="samplesInput" type="number" min="1" step="1" value="64" />
+          </label>
+          <label class="field">
+            <span>Antenna height</span>
+            <div class="input-with-unit">
+              <input id="antennaInput" type="number" min="0" step="0.1" value="1.5" />
+              <span>m</span>
+            </div>
+          </label>
+          <div class="toggle-stack">
+            <label class="toggle-line">
+              <input id="gpuInput" type="checkbox" checked />
+              <span>Prefer GPU</span>
+            </label>
+            <label class="toggle-line">
+              <input id="canopyInput" type="checkbox" checked />
+              <span>Use canopy layer</span>
+            </label>
+            <label class="toggle-line">
+              <input id="buildingsInput" type="checkbox" checked />
+              <span>Use building layer</span>
+            </label>
+            <label class="toggle-line">
+              <input id="cacheInput" type="checkbox" checked />
+              <span>Use cache</span>
+            </label>
+          </div>
+        </details>
+      </aside>
+
+      <main class="workspace" aria-label="Map workspace">
+        <div class="topbar">
+          <div class="segmented" role="tablist" aria-label="Workspace view">
+            <button class="segment active" data-view="map" type="button">
+              <i data-lucide="map"></i>
+              <span>2D map</span>
+            </button>
+            <button class="segment" data-view="terrain" type="button">
+              <i data-lucide="mountain"></i>
+              <span>3D terrain</span>
+            </button>
+          </div>
+          <div class="layer-strip" aria-label="Layer controls">
+            <button class="layer-toggle active" data-layer="probability" type="button">Heatmap</button>
+            <button class="layer-toggle active" data-layer="credible" type="button">50%</button>
+            <button class="layer-toggle active" data-layer="sightings" type="button">Sightings</button>
+            <select id="rayModeSelect" class="select-control" aria-label="Ray mode">
+              <option value="off">Rays off</option>
+              <option value="selected">Selected rays</option>
+              <option value="fan">Viewshed fan</option>
+              <option value="profile">Profile</option>
+            </select>
+          </div>
+        </div>
+
+        <section id="mapView" class="stage-view active" aria-label="2D map">
+          <div id="map"></div>
+          <div class="map-legend" aria-label="Heatmap legend">
+            <span>Low</span>
+            <div class="legend-ramp"></div>
+            <span>High</span>
+          </div>
+        </section>
+
+        <section id="terrainView" class="stage-view" aria-label="3D terrain">
+          <div id="terrainHost"></div>
+          <div class="terrain-toolbar">
+            <label class="field compact">
+              <span>Vertical scale</span>
+              <input id="verticalScaleInput" type="range" min="0.4" max="3" step="0.1" value="1.4" />
+            </label>
+            <label class="toggle-line compact">
+              <input id="terrainBuildingsInput" type="checkbox" checked />
+              <span>Buildings</span>
+            </label>
+            <label class="toggle-line compact">
+              <input id="terrainCanopyInput" type="checkbox" />
+              <span>Canopy</span>
+            </label>
+            <button id="reloadTerrainButton" class="control-button compact" type="button">
+              <i data-lucide="refresh-cw"></i>
+              <span>Reload</span>
+            </button>
+          </div>
+          <div id="terrainStatus" class="terrain-status">Terrain tiles load from AWS Open Data.</div>
+        </section>
+      </main>
+
+      <aside id="rightRail" class="rail rail-right" aria-label="Results and diagnostics">
+        <button id="collapseRightButton" class="collapse-button" type="button" title="Collapse results">
+          <i data-lucide="panel-right-close"></i>
+        </button>
+        <section class="panel-section result-summary">
+          <div class="section-head">
+            <h2>Result</h2>
+            <span id="runStateBadge" class="count-pill muted">Idle</span>
+          </div>
+          <div class="metric-grid">
+            <div class="metric">
+              <span>Most likely</span>
+              <strong id="mostLikelyValue">-</strong>
+            </div>
+            <div class="metric">
+              <span>50% area</span>
+              <strong id="credibleAreaValue">-</strong>
+            </div>
+          </div>
+          <p id="limitationsNote" class="note">
+            Probability is a likelihood surface. Sparse sightings and weak terrain data widen the credible region.
+          </p>
+          <div class="action-row">
+            <button id="exportTiffButton" class="control-button" type="button" disabled>
+              <i data-lucide="file-down"></i>
+              <span>GeoTIFF</span>
+            </button>
+            <button id="exportPngButton" class="control-button" type="button" disabled>
+              <i data-lucide="image-down"></i>
+              <span>PNG preview</span>
+            </button>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-head">
+            <h2>Cell inspector</h2>
+          </div>
+          <div id="inspectorBody" class="inspector-body">
+            <p class="status-message">Hover or click a probability cell.</p>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-head">
+            <h2>Run timeline</h2>
+          </div>
+          <ol id="timeline" class="timeline">
+            <li class="pending"><span>Prepare AOI</span><time>-</time></li>
+            <li class="pending"><span>Fetch surfaces</span><time>-</time></li>
+            <li class="pending"><span>Run fusion</span><time>-</time></li>
+            <li class="pending"><span>Serialize result</span><time>-</time></li>
+            <li class="pending"><span>Export ready</span><time>-</time></li>
+          </ol>
+        </section>
+
+        <details class="panel-section disclosure">
+          <summary>
+            <span>Diagnostics</span>
+            <i data-lucide="chevron-down"></i>
+          </summary>
+          <div class="toggle-stack">
+            <label class="toggle-line">
+              <input class="diagnostic-layer" data-layer="dsm" type="checkbox" />
+              <span>DSM</span>
+            </label>
+            <label class="toggle-line">
+              <input class="diagnostic-layer" data-layer="bareEarth" type="checkbox" />
+              <span>Bare earth</span>
+            </label>
+            <label class="toggle-line">
+              <input class="diagnostic-layer" data-layer="canopyHeight" type="checkbox" />
+              <span>Canopy height</span>
+            </label>
+            <label class="toggle-line">
+              <input class="diagnostic-layer" data-layer="buildingHeight" type="checkbox" />
+              <span>Building height</span>
+            </label>
+            <label class="toggle-line">
+              <input class="diagnostic-layer" data-layer="launchWeight" type="checkbox" />
+              <span>Launch weight</span>
+            </label>
+          </div>
+          <label class="field">
+            <span>Contribution</span>
+            <select id="contributionSelect" class="select-control">
+              <option value="">All sightings</option>
+            </select>
+          </label>
+          <div id="metadataList" class="metadata-list"></div>
+        </details>
+      </aside>
+    </div>
+
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

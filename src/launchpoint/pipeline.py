@@ -16,7 +16,7 @@ from launchpoint.config import Config
 from launchpoint.core.geo import Projector, aoi_for_sightings
 from launchpoint.core.grid import RasterGrid
 from launchpoint.core.sighting import Sighting
-from launchpoint.fusion.montecarlo import FusionResult, fuse_sightings
+from launchpoint.fusion.montecarlo import FusionResult, ProgressCallback, fuse_sightings
 
 
 @dataclass
@@ -61,6 +61,7 @@ def find_origin(
     ground: RasterGrid | None = None,
     projector: Projector | None = None,
     launch_weight: RasterGrid | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> OriginEstimate:
     """Estimate the controller-origin probability heatmap.
 
@@ -97,6 +98,7 @@ def find_origin(
         projector=projector,
         ground=ground,
         launch_weight=launch_weight,
+        progress_callback=progress_callback,
     )
     return OriginEstimate(
         probability=fusion.probability, fusion=fusion, projector=projector
