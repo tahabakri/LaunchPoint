@@ -176,12 +176,16 @@ def _config_from_payload(payload: dict) -> tuple[Config, dict]:
     antenna_height_m = float(settings.get("antenna_height_m", 1.5))
     prefer_gpu = bool(settings.get("prefer_gpu", True))
     cache_dir = str(settings.get("cache_dir", "data_cache"))
+    combine = str(settings.get("combine", "min"))
+    if combine not in ("min", "geometric_mean", "arithmetic_mean"):
+        combine = "min"
 
     config = Config(
         max_range_m=max_range_m,
         antenna_height_m=antenna_height_m,
         prefer_gpu=prefer_gpu,
         cache_dir=cache_dir,
+        combine=combine,
         monte_carlo=MonteCarloConfig(samples_per_sighting=samples),
     )
     layer_flags = {
@@ -301,8 +305,12 @@ def _stage_percent(stages: list[dict], status: str) -> float:
         return 0.35 + 0.55 * ((current - 1) / total)
     if stages_by_name.get("Fetch surfaces", {}).get("status") == "complete":
         return 0.35
-    if stages_by_name.get("Fetch surfaces"):
-        return 0.12
+    fetch = stages_by_name.get("Fetch surfaces")
+    if fetch:
+        # The data layer reports its own 0..1 download fraction; map it into the
+        # slice of the bar reserved for fetching (0.12 -> 0.35).
+        frac = float((fetch.get("details") or {}).get("fetchProgress", 0.0))
+        return 0.12 + 0.23 * min(max(frac, 0.0), 1.0)
     if stages_by_name.get("Prepare AOI", {}).get("status") == "complete":
         return 0.08
     if stages_by_name.get("Prepare AOI"):
@@ -426,7 +434,13 @@ def _run_analysis(payload: dict, job: RunJob | None = None) -> tuple[str, RunRec
         "Fetching DSM, canopy, and building surfaces",
         aoi_details,
     )
-    stack = build_surface_stack(sightings, config, projector=projector, **layer_flags)
+    stack = build_surface_stack(
+        sightings, config, projector=projector,
+        progress_callback=lambda name, status, message, details: _mark_job_stage(
+            job, name, status, message, details
+        ),
+        **layer_flags,
+    )
     surface_details = {
         **aoi_details,
         "rows": stack.occluder.rows,
@@ -476,6 +490,7 @@ def _run_analysis(payload: dict, job: RunJob | None = None) -> tuple[str, RunRec
 
     metadata = {
         "samples": config.monte_carlo.samples_per_sighting,
+        "combine": config.combine,
         "maxRangeM": config.max_range_m,
         "gpuMode": "gpu-preferred" if config.prefer_gpu else "cpu",
         "cacheDir": config.cache_dir,

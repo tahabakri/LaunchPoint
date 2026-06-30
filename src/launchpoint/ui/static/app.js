@@ -70,6 +70,7 @@ function cacheElements() {
     "sightingList",
     "maxRangeInput",
     "samplesInput",
+    "combineSelect",
     "antennaInput",
     "gpuInput",
     "canopyInput",
@@ -197,6 +198,7 @@ async function fetchDefaults() {
     if (payload.settings) {
       el.maxRangeInput.value = payload.settings.maxRangeM ?? el.maxRangeInput.value;
       el.samplesInput.value = payload.settings.samplesPerSighting ?? el.samplesInput.value;
+      if (payload.settings.combine) el.combineSelect.value = payload.settings.combine;
       el.antennaInput.value = payload.settings.antennaHeightM ?? el.antennaInput.value;
       el.gpuInput.checked = payload.settings.preferGpu !== false;
     }
@@ -594,6 +596,7 @@ function readSettings() {
   return {
     max_range_m: Number(el.maxRangeInput.value),
     samples_per_sighting: Number(el.samplesInput.value),
+    combine: el.combineSelect.value,
     antenna_height_m: Number(el.antennaInput.value),
     prefer_gpu: el.gpuInput.checked,
     use_canopy: el.canopyInput.checked,

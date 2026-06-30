@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import os
+import time
+from typing import TYPE_CHECKING
 
 import requests
 from rasterio.warp import Resampling
@@ -27,6 +29,9 @@ from launchpoint.core.grid import RasterGrid
 from launchpoint.data.copernicus import lonlat_bbox_of_grid
 from launchpoint.data.cog import mosaic_cogs_onto
 
+if TYPE_CHECKING:
+    from launchpoint.data.progress import FetchReporter
+
 # Public, keyless endpoints for the Meta/WRI canopy-height product.
 # Bucket: dataforgood-fb-data (anonymous HTTPS). The tile index is a ~15 MB
 # GeoJSON of 56k polygons, each with a 'tile' id; CHM COGs live under chm/.
@@ -35,14 +40,27 @@ TILE_INDEX_URL = f"{_BASE}/tiles.geojson"
 TILE_URL_TEMPLATE = _BASE + "/chm/{tile}.tif"
 
 
-def _load_tile_index(cache_dir: str | None = None, timeout: int = 120) -> list[dict]:
+def _load_tile_index(
+    cache_dir: str | None = None,
+    timeout: int = 120,
+    reporter: "FetchReporter | None" = None,
+) -> list[dict]:
     """Load the canopy tile index, caching the ~15 MB GeoJSON to disk."""
     cache_path = os.path.join(cache_dir, "meta_canopy_tiles.geojson") if cache_dir else None
     if cache_path and os.path.exists(cache_path):
+        if reporter is not None:
+            reporter.note(f"canopy tile index: cached ({_short(cache_path)})")
         with open(cache_path, "r", encoding="utf-8") as fh:
             return json.load(fh)["features"]
+    start = time.perf_counter()
     resp = requests.get(TILE_INDEX_URL, timeout=timeout)
     resp.raise_for_status()
+    n_bytes = len(resp.content)
+    if reporter is not None:
+        reporter.note(
+            f"canopy tile index downloaded in {time.perf_counter() - start:.2f}s",
+            n_bytes=n_bytes,
+        )
     if cache_path:
         os.makedirs(cache_dir, exist_ok=True)
         with open(cache_path, "w", encoding="utf-8") as fh:
@@ -50,14 +68,21 @@ def _load_tile_index(cache_dir: str | None = None, timeout: int = 120) -> list[d
     return json.loads(resp.text)["features"]
 
 
+def _short(path: str) -> str:
+    return os.path.basename(path)
+
+
 def canopy_tile_urls(
-    target: RasterGrid, projector: Projector, cache_dir: str | None = None
+    target: RasterGrid,
+    projector: Projector,
+    cache_dir: str | None = None,
+    reporter: "FetchReporter | None" = None,
 ) -> list[str]:
     """URLs of canopy COG tiles intersecting the AOI (queries the tile index)."""
     bb = lonlat_bbox_of_grid(target, projector)
     aoi = box(bb.minx, bb.miny, bb.maxx, bb.maxy)
     urls = []
-    for feat in _load_tile_index(cache_dir):
+    for feat in _load_tile_index(cache_dir, reporter=reporter):
         if shape(feat["geometry"]).intersects(aoi):
             tile = feat["properties"].get("tile") or feat["properties"].get("quadkey")
             if tile:
@@ -65,15 +90,46 @@ def canopy_tile_urls(
     return urls
 
 
+# Native canopy raster: ~1.19 m pixels, uint8, stored as full-width single-row
+# strips of this many columns. A windowed read still pulls every touched strip
+# in full, so raw bytes ~= (source rows spanned) x TILE_WIDTH_PX.
+NATIVE_RES_M = 1.194
+TILE_WIDTH_PX = 65536
+
+
+def _estimate_raw_bytes(target: RasterGrid, n_tiles: int) -> float:
+    """Indicative raw (pre-compression) bytes the strip layout forces us to read."""
+    rows_spanned = max(1.0, target.bounds.height / NATIVE_RES_M)
+    return rows_spanned * TILE_WIDTH_PX * n_tiles  # uint8 -> 1 byte/px
+
+
 def fetch_canopy_height(
-    target: RasterGrid, projector: Projector, cache_dir: str | None = None
+    target: RasterGrid,
+    projector: Projector,
+    cache_dir: str | None = None,
+    reporter: "FetchReporter | None" = None,
 ) -> RasterGrid:
     """Fetch + mosaic the canopy-height layer onto ``target`` (DSM grid).
 
     Uses MAX resampling so the tallest 1 m tree dominates its coarse cell. Cells
     with no canopy data come back NaN and are treated as 0 downstream.
     """
-    urls = canopy_tile_urls(target, projector, cache_dir)
+    urls = canopy_tile_urls(target, projector, cache_dir, reporter=reporter)
+    if reporter is not None:
+        est = _estimate_raw_bytes(target, max(len(urls), 1))
+        from launchpoint.data.progress import human_bytes
+
+        reporter.layer_start(
+            "canopy",
+            len(urls),
+            note=(
+                f"Meta/WRI 1 m, window ~{target.bounds.width / 1000:.1f} x "
+                f"{target.bounds.height / 1000:.1f} km, ~{human_bytes(est)} raw strips"
+            ),
+        )
     if not urls:
         return target.like(fill=0.0)
-    return mosaic_cogs_onto(urls, target, resampling=Resampling.max, missing_ok=True)
+    return mosaic_cogs_onto(
+        urls, target, resampling=Resampling.max, missing_ok=True,
+        reporter=reporter, layer="canopy",
+    )

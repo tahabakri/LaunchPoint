@@ -89,6 +89,26 @@ class Config:
     antenna_height_m: float = DEFAULT_ANTENNA_HEIGHT_M
     coarse_resolution_m: float = DEFAULT_DSM_RESOLUTION_M
     fine_resolution_m: float = DEFAULT_FINE_RESOLUTION_M
+
+    combine: str = "min"
+    """How per-sighting visibility surfaces are combined into the heatmap.
+
+    The core assumption is a *single* launch point, so a controller location is
+    only viable if **every** sighting can be seen from it.
+
+    * ``"min"`` (default) — strict intersection: the cell value is the *weakest*
+      sighting's contribution, so a single pin that cannot see a cell gates it
+      to ~0. This is the faithful "all drones must be visible" rule. Monte-Carlo
+      sampling inside each sighting keeps it soft (it is the min of per-sighting
+      *probabilities*, not of hard booleans).
+    * ``"geometric_mean"`` — softer intersection ``(prod c_i)^(1/n)``. A single
+      low pin only dents the score (``0.2`` over four 1.0s still ~0.72), so weak
+      corners survive; kept for comparison, not recommended as the default.
+    * ``"arithmetic_mean"`` — soft *union* ``mean_i c_i``: a cell lights up if it
+      sees a large *fraction* of sightings, so areas only one drone can reach
+      still show. Most forgiving of a bad sighting, but blurriest.
+    """
+
     altitude_is_agl: bool = True
     """If True, Sighting.altitude is metres above ground at the drone's position;
     converted to absolute (ASL) by adding the surface elevation under the drone.

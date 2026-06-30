@@ -76,6 +76,14 @@
             <input id="samplesInput" type="number" min="1" step="1" value="64" />
           </label>
           <label class="field">
+            <span>Combine sightings</span>
+            <select id="combineSelect" class="select-control" aria-label="Combine mode">
+              <option value="min">Strict — every drone must see</option>
+              <option value="geometric_mean">Common area (soft)</option>
+              <option value="arithmetic_mean">Any reach (union)</option>
+            </select>
+          </label>
+          <label class="field">
             <span>Antenna height</span>
             <div class="input-with-unit">
               <input id="antennaInput" type="number" min="0" step="0.1" value="1.5" />

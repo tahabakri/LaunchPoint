@@ -12,12 +12,21 @@ paths through anonymous access (``AWS_NO_SIGN_REQUEST=YES``).
 from __future__ import annotations
 
 import contextlib
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import rasterio
 from rasterio.warp import Resampling, reproject
 
 from launchpoint.core.grid import RasterGrid
+from launchpoint.data.progress import FetchReporter
+
+# Remote COG tiles are read concurrently. The S3 buckets (Copernicus, Meta) have
+# no meaningful per-client rate limit and GDAL releases the GIL during I/O, so a
+# small pool turns "one tile at a time" into a parallel pull. Kept modest to stay
+# polite and avoid saturating a typical connection.
+DEFAULT_MAX_WORKERS = 6
 
 # GDAL knobs that make remote COG reads fast and keyless.
 _GDAL_ENV = {
@@ -72,28 +81,62 @@ def reproject_cog_onto(
     return dest
 
 
+def _short_name(url: str) -> str:
+    return url.rstrip("/").split("/")[-1]
+
+
 def mosaic_cogs_onto(
     urls: list[str],
     target: RasterGrid,
     *,
     resampling: Resampling = Resampling.bilinear,
     missing_ok: bool = True,
+    max_workers: int = DEFAULT_MAX_WORKERS,
+    reporter: FetchReporter | None = None,
+    layer: str = "",
 ) -> RasterGrid:
     """Mosaic several COG tiles onto ``target``, filling gaps tile by tile.
 
-    Tiles are composited in order; a later tile only fills cells still NaN, so
-    overlaps keep the first tile's value. Missing/unreachable tiles are skipped
-    when ``missing_ok`` (ocean tiles legitimately don't exist for GLO-30).
+    Tiles are fetched **concurrently** (each worker opens its own GDAL handle and
+    environment, since GDAL config is thread-local) but composited in the
+    original order, so a later tile only fills cells still NaN and overlaps keep
+    the first tile's value — identical to a serial mosaic. Missing/unreachable
+    tiles are skipped when ``missing_ok`` (ocean tiles legitimately don't exist
+    for GLO-30). ``reporter`` receives per-tile timing for logging + UI progress.
     """
     out = np.full(target.shape, np.nan, dtype=np.float32)
-    with gdal_env():
-        for url in urls:
+    n = len(urls)
+    if n == 0:
+        return target.copy_with(out)
+
+    def _fetch(index: int, url: str) -> tuple[int, np.ndarray | None, float]:
+        start = time.perf_counter()
+        with gdal_env():
             try:
-                layer = reproject_cog_onto(url, target, resampling=resampling)
+                arr = reproject_cog_onto(url, target, resampling=resampling)
             except rasterio.errors.RasterioIOError:
                 if missing_ok:
-                    continue
-                raise
-            gap = ~np.isfinite(out)
-            out[gap] = layer[gap]
+                    arr = None
+                else:
+                    raise
+        return index, arr, time.perf_counter() - start
+
+    results: list[np.ndarray | None] = [None] * n
+    workers = max(1, min(max_workers, n))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_fetch, i, url) for i, url in enumerate(urls)]
+        done = 0
+        for future in as_completed(futures):
+            index, arr, secs = future.result()
+            results[index] = arr
+            done += 1
+            if reporter is not None:
+                reporter.tile(layer or "tiles", done, n, _short_name(urls[index]), secs)
+
+    # Composite in the original tile order so overlap precedence is deterministic.
+    for arr in results:
+        if arr is None:
+            continue
+        gap = ~np.isfinite(out)
+        out[gap] = arr[gap]
     return target.copy_with(out)

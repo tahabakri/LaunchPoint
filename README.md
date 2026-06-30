@@ -87,8 +87,8 @@ probability raster.
 | **0** | Core data structures (`Sighting`, `RasterGrid`), local-UTM projection rule, and a **synthetic validation harness** — a fully-known terrain + planted controller + geometrically-visible sightings — so every later phase has objective ground truth. |
 | **1** | **Keyless data layer.** Computes the area of interest (sightings + max range), then reads windowed Cloud-Optimized GeoTIFFs (HTTP range requests) for the **Copernicus GLO-30 DSM**, reprojected/mosaicked onto the common UTM grid and cached. |
 | **2** | **Single-observer viewshed.** A radial-sweep (R3) line-of-sight kernel with **4/3-Earth curvature + refraction** correction and a **soft range model** (plateau → logistic roll-off, not a hard disk). A brute-force oracle validates it. |
-| **3** | **Fusion + Monte Carlo.** Accumulates (soft mean, *not* hard-AND) how many sightings each candidate cell can see, sampling each sighting's position/altitude uncertainty N times. The heatmap means "how often a controller here could see enough of the sightings, across all the ways the sightings might really have been." |
-| **4** | **Surface enrichment.** Burns OSM building heights and the **Meta/WRI 1 m canopy** into the picture, and *derives* a bare-earth surface `bare = DSM − canopy − building` (no FABDEM dependency, all commercial-friendly). Canopy also drives a soft launch-feasibility down-weight. |
+| **3** | **Fusion + Monte Carlo.** Scores each candidate cell by visibility from every sighting, sampling each sighting's position/altitude uncertainty N times. Sightings are combined with a **strict minimum** by default (`combine="min"`) — the cell value is gated by the *weakest* sighting, so a single drone that cannot see a location drives it to ~0. This enforces the single-launch-point assumption: every drone must be visible from the operator's spot. `combine="geometric_mean"` is a softer intersection and `"arithmetic_mean"` the forgiving union. |
+| **4** | **Surface enrichment.** Burns OSM building heights and the **Meta/WRI 1 m canopy** into the picture, and *derives* a bare-earth surface `bare = DSM − canopy − building` (no FABDEM dependency, all commercial-friendly). Canopy also drives a soft launch-feasibility down-weight. The 1 m canopy is fetched **only inside the DSM-reachable footprint** (see below), not the whole range disk. |
 | **5** | **Performance.** Coarse-to-fine: a cheap 30 m pass over the whole disk, then fine (1–2 m) refinement **only** in hot candidate patches and around each sighting. A CUDA viewshed kernel (with automatic CPU fallback) accelerates the fine pass. |
 
 ### Geometry conventions
@@ -101,6 +101,18 @@ probability raster.
   roof.
 * Observer = the drone at its (sampled) position and altitude. AGL altitudes are
   converted to absolute using the surface beneath the drone.
+
+### Footprint-gated canopy fetch
+
+The 1 m Meta/WRI canopy is the bandwidth-heavy layer (its tiles are full-width
+single-row strips with no overviews, so a naïve windowed read of the whole range
+disk can pull ~1 GB). Canopy only matters where a controller could actually
+stand, so LaunchPoint first runs a cheap **bare-DSM viewshed** per sighting to
+find the *reachable footprint* — the cells any ray can land on — then fetches
+high-resolution canopy **only inside that footprint's bounding box**. This is
+lossless: adding canopy can only ever *shrink* a viewshed (it raises the
+occluder), so the DSM-only footprint is a strict superset of the true
+canopy-aware one — fetching canopy outside it would never change the answer.
 
 ---
 
@@ -146,6 +158,19 @@ est.probability.write_geotiff("origin.tif")  # full heatmap
 
 No Google Earth Engine path is used (it requires an account). No FABDEM is fetched
 (its bare earth is derived instead), which keeps every input commercial-friendly.
+
+### Fetching: parallel + observable
+
+Remote COG tiles (DSM, canopy) are pulled **concurrently** through a small thread
+pool — each worker holds its own GDAL handle, and tiles are composited back in
+their original order so the result is identical to a serial mosaic, just faster.
+The shared, rate-limited Overpass building API stays a single sequential request.
+
+Every fetch is logged to the terminal (the window `run.bat` opens) via the
+`launchpoint.data` logger: which layer, tile-by-tile timing, bytes pulled where
+measurable, and per-layer totals — so it's obvious what is slow or large. The UI
+turns the same events into a live download percentage on the run progress bar.
+Run the CLI with `--verbose` for debug-level detail.
 
 ---
 

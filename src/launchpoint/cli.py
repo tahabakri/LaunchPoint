@@ -15,10 +15,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 
 from launchpoint.config import Config, MonteCarloConfig
 from launchpoint.core.sighting import Sighting
+
+
+def _configure_logging(verbose: bool = False) -> None:
+    """Send the data layer's fetch logs to the terminal (run.bat window)."""
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s  %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
 
 def _load_sightings(path: str) -> list[Sighting]:
@@ -48,6 +58,7 @@ def _config_from_args(args) -> Config:
         antenna_height_m=args.antenna_height,
         prefer_gpu=args.gpu,
         cache_dir=args.cache,
+        combine=args.combine,
         monte_carlo=MonteCarloConfig(samples_per_sighting=args.samples),
     )
 
@@ -82,7 +93,10 @@ def _cmd_demo(args) -> int:
     import numpy as np
 
     sc = make_default_scenario(n_sightings=args.sightings_count, seed=args.seed)
-    config = Config(monte_carlo=MonteCarloConfig(samples_per_sighting=args.samples))
+    config = Config(
+        combine=args.combine,
+        monte_carlo=MonteCarloConfig(samples_per_sighting=args.samples),
+    )
     est = find_origin(
         sc.sightings, config=config, occluder=sc.surface, projector=sc.projector
     )
@@ -111,8 +125,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--out", default="origin.tif", help="output GeoTIFF path")
+    common.add_argument("--verbose", action="store_true", help="debug-level logging")
     common.add_argument("--samples", type=int, default=64,
                         help="Monte-Carlo samples per sighting")
+    common.add_argument(
+        "--combine", choices=["min", "geometric_mean", "arithmetic_mean"],
+        default="min",
+        help="cross-sighting combine rule: min = strict, every drone must see "
+             "the cell (default); geometric_mean = softer common area; "
+             "arithmetic_mean = union (any drone reaches)",
+    )
 
     pr = sub.add_parser("run", parents=[common], help="run on real sightings (network)")
     pr.add_argument("--sightings", required=True, help="JSON file of sightings")
@@ -130,6 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
     pu = sub.add_parser("ui", help="serve the Phase 6 browser workspace")
     pu.add_argument("--host", default="127.0.0.1")
     pu.add_argument("--port", type=int, default=8765)
+    pu.add_argument("--verbose", action="store_true", help="debug-level logging")
     pu.set_defaults(func=_cmd_ui)
 
     return p
@@ -137,6 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv if argv is not None else sys.argv[1:])
+    _configure_logging(getattr(args, "verbose", False))
     return args.func(args)
 
 

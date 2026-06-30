@@ -13,6 +13,9 @@ Gap-fill from Microsoft Global Building Footprints / Google Open Buildings
 
 from __future__ import annotations
 
+import time
+from typing import TYPE_CHECKING
+
 import requests
 from rasterio.features import rasterize
 from shapely.geometry import Polygon
@@ -20,6 +23,9 @@ from shapely.geometry import Polygon
 from launchpoint.core.geo import Projector
 from launchpoint.core.grid import RasterGrid
 from launchpoint.data.copernicus import lonlat_bbox_of_grid
+
+if TYPE_CHECKING:
+    from launchpoint.data.progress import FetchReporter
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 # Overpass rejects requests without a descriptive User-Agent (HTTP 406).
@@ -45,7 +51,8 @@ def _parse_height(tags: dict) -> float:
 
 
 def fetch_osm_buildings(
-    target: RasterGrid, projector: Projector, timeout: int = 90
+    target: RasterGrid, projector: Projector, timeout: int = 90,
+    reporter: "FetchReporter | None" = None,
 ) -> list[tuple[Polygon, float]]:
     """Return (UTM-projected polygon, height_m) pairs for buildings in the AOI."""
     bb = lonlat_bbox_of_grid(target, projector)
@@ -56,11 +63,22 @@ def fetch_osm_buildings(
         "out geom;"
     ).format(t=timeout, s=bb.miny, w=bb.minx, n=bb.maxy, e=bb.maxx)
 
+    # Overpass is rate-limited and shared, so this stays a single sequential
+    # request (no parallel hammering) — only the S3 COG tiles are parallelised.
+    if reporter is not None:
+        reporter.layer_start("buildings", note="OSM / Overpass")
+    start = time.perf_counter()
     resp = requests.post(
         OVERPASS_URL, data={"data": query}, headers=HTTP_HEADERS, timeout=timeout + 10
     )
     resp.raise_for_status()
     elements = resp.json().get("elements", [])
+    if reporter is not None:
+        reporter.note(
+            f"overpass returned {len(elements)} building(s) in "
+            f"{time.perf_counter() - start:.2f}s",
+            n_bytes=len(resp.content),
+        )
 
     out: list[tuple[Polygon, float]] = []
     for el in elements:
@@ -103,7 +121,10 @@ def rasterize_buildings(
     return target.copy_with(arr)
 
 
-def fetch_building_height(target: RasterGrid, projector: Projector) -> RasterGrid:
+def fetch_building_height(
+    target: RasterGrid, projector: Projector,
+    reporter: "FetchReporter | None" = None,
+) -> RasterGrid:
     """Convenience: fetch OSM footprints and rasterize to a height grid."""
-    geoms = fetch_osm_buildings(target, projector)
+    geoms = fetch_osm_buildings(target, projector, reporter=reporter)
     return rasterize_buildings(geoms, target)

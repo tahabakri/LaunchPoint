@@ -12,12 +12,16 @@ Bucket / access (no key, no account):
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from launchpoint.core.geo import BBox, Projector
 from launchpoint.core.grid import RasterGrid
 from launchpoint.data.cog import mosaic_cogs_onto
+
+if TYPE_CHECKING:
+    from launchpoint.data.progress import FetchReporter
 
 BASE_URL = "https://copernicus-dem-30m.s3.amazonaws.com"
 
@@ -65,11 +69,17 @@ def lonlat_bbox_of_grid(grid: RasterGrid, projector: Projector, n: int = 8) -> B
                float(np.max(lon)), float(np.max(lat)))
 
 
-def fetch_dsm(target: RasterGrid, projector: Projector) -> RasterGrid:
+def fetch_dsm(
+    target: RasterGrid,
+    projector: Projector,
+    reporter: "FetchReporter | None" = None,
+) -> RasterGrid:
     """Fetch + mosaic + align the GLO-30 DSM onto ``target`` (UTM grid).
 
     Requires network on first call; cache the result upstream for offline reuse.
     """
     bb = lonlat_bbox_of_grid(target, projector)
     urls = tiles_for_lonlat_bbox(bb.minx, bb.miny, bb.maxx, bb.maxy)
-    return mosaic_cogs_onto(urls, target, missing_ok=True)
+    if reporter is not None:
+        reporter.layer_start("DSM", len(urls), note="Copernicus GLO-30, ~30 m")
+    return mosaic_cogs_onto(urls, target, missing_ok=True, reporter=reporter, layer="DSM")
