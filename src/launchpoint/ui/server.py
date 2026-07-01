@@ -443,6 +443,21 @@ def _surface_layers(stack: SurfaceStack, projector: Projector) -> dict:
     return layers
 
 
+def _gpu_mode(prefer_gpu: bool) -> str:
+    """Report the viewshed backend actually in effect, not just what was asked.
+
+    Avoids the old misleading "gpu-preferred" label when the run silently fell
+    back to CPU (the reported symptom): resolves the real GPU status so the UI
+    shows "gpu" only when the CUDA kernel will run.
+    """
+    if not prefer_gpu:
+        return "cpu"
+    from launchpoint.viewshed.gpu import gpu_status
+
+    available, reason = gpu_status()
+    return "gpu" if available else f"cpu (GPU requested but unavailable: {reason})"
+
+
 def _native_canopy_resolution_m(source: str) -> float:
     if source == "meta":
         from launchpoint.data.canopy import NATIVE_RES_M
@@ -493,15 +508,25 @@ def _fetch_canopy_diagnostic_layer(record: RunRecord, bounds: BBox) -> RasterGri
     if source == "meta":
         from launchpoint.data.canopy import fetch_canopy_height
 
-        return fetch_canopy_height(
+        grid = fetch_canopy_height(
+            target, projector, cache_dir=record.metadata.get("cacheDir"), reporter=None
+        )
+    else:
+        from launchpoint.data.eth_canopy import fetch_canopy_height_eth
+
+        grid = fetch_canopy_height_eth(
             target, projector, cache_dir=record.metadata.get("cacheDir"), reporter=None
         )
 
-    from launchpoint.data.eth_canopy import fetch_canopy_height_eth
+    # Apply the same ground-floor cutoff the run used so the high-res diagnostic
+    # matches the canopy the model actually consumed (see CanopyConfig.ground_floor_m).
+    from launchpoint.config import CanopyConfig
+    from launchpoint.data.bare_earth import apply_ground_floor
 
-    return fetch_canopy_height_eth(
-        target, projector, cache_dir=record.metadata.get("cacheDir"), reporter=None
-    )
+    floor = record.metadata.get("canopyGroundFloorM")
+    if floor is None:
+        floor = CanopyConfig().effective_ground_floor_m(source)
+    return apply_ground_floor(grid, float(floor))
 
 
 def _diagnostic_layer_payload(run_id: str, record: RunRecord, params: dict[str, list[str]]) -> dict:
@@ -644,9 +669,10 @@ def _run_analysis(payload: dict, job: RunJob | None = None) -> tuple[str, RunRec
         "samples": config.monte_carlo.samples_per_sighting,
         "combine": config.combine,
         "canopySource": config.canopy_source,
+        "canopyGroundFloorM": config.canopy.effective_ground_floor_m(config.canopy_source),
         "analysisResolutionM": config.coarse_resolution_m,
         "maxRangeM": config.max_range_m,
-        "gpuMode": "gpu-preferred" if config.prefer_gpu else "cpu",
+        "gpuMode": _gpu_mode(config.prefer_gpu),
         "cacheDir": config.cache_dir,
         "aoi": surface_details,
         "layers": {

@@ -25,7 +25,11 @@ from launchpoint.config import Config
 from launchpoint.core.geo import BBox, Projector, aoi_for_sightings
 from launchpoint.core.grid import RasterGrid
 from launchpoint.core.sighting import Sighting
-from launchpoint.data.bare_earth import derive_bare_earth, launch_feasibility_weight
+from launchpoint.data.bare_earth import (
+    apply_ground_floor,
+    derive_bare_earth,
+    launch_feasibility_weight,
+)
 from launchpoint.data.cache import Cache, cache_key
 from launchpoint.data.progress import FetchReporter, StageCallback, log
 
@@ -146,13 +150,18 @@ def build_surface_stack(
     res = config.coarse_resolution_m
     cache = Cache(config.cache_dir)
     # The DSM is source-independent; bare earth and launch weight are derived
-    # from the canopy, so they must not be shared across canopy sources.
+    # from the canopy, so they must not be shared across canopy sources — and,
+    # because they change with the ground-floor cutoff applied to that canopy,
+    # the floor is folded into the key too (tuning it re-derives, never serves
+    # stale surfaces). The occluder DSM and buildings are unaffected by both.
     src = config.canopy_source
+    floor = config.canopy.effective_ground_floor_m(src)
+    tag = f"{src}_gf{floor:g}"
     keys = {
         "occluder": cache_key("dsm", bbox, epsg, res),
-        "ground": cache_key(f"bare_earth_{src}", bbox, epsg, res),
-        "launch": cache_key(f"launch_weight_{src}", bbox, epsg, res),
-        "canopy": cache_key(f"canopy_height_{src}", bbox, epsg, res),
+        "ground": cache_key(f"bare_earth_{tag}", bbox, epsg, res),
+        "launch": cache_key(f"launch_weight_{tag}", bbox, epsg, res),
+        "canopy": cache_key(f"canopy_height_{tag}", bbox, epsg, res),
         "building": cache_key("building_height", bbox, epsg, res),
     }
     required_keys = ["occluder", "ground", "launch"]
@@ -203,6 +212,11 @@ def build_surface_stack(
                 occluder, projector, config.cache_dir, footprint, reporter=reporter,
                 fetcher=_canopy_fetcher(config.canopy_source),
             )
+            # Cancel the source's low-vegetation bias before it feeds bare earth /
+            # launch weight (see CanopyConfig.ground_floor_m). Done here so the
+            # cached canopy layer and its UI display match what the model uses.
+            floor = config.canopy.effective_ground_floor_m(config.canopy_source)
+            canopy = apply_ground_floor(canopy, floor)
             reporter.layer_done("canopy", time.perf_counter() - t0)
         except Exception as exc:  # noqa: BLE001 - best-effort layer
             warnings.warn(f"canopy fetch failed, continuing without it: {exc}")

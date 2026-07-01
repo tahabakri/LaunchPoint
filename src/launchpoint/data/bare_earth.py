@@ -25,6 +25,24 @@ from launchpoint.config import CanopyConfig
 from launchpoint.core.grid import RasterGrid
 
 
+def apply_ground_floor(
+    canopy_height: RasterGrid | None, floor_m: float
+) -> RasterGrid | None:
+    """Zero out canopy at/below ``floor_m`` (treat it as bare ground).
+
+    Cancels the ETH 10 m product's positive bias over open / low-vegetation
+    ground so it no longer sinks the derived bare-earth surface (see
+    ``CanopyConfig.ground_floor_m``). NaN (no-data) cells are preserved as NaN so
+    the "missing canopy -> 0 downstream" contract is unchanged. A ``floor_m`` of
+    0 is a no-op, so the near-zero Meta product passes through untouched.
+    """
+    if canopy_height is None or floor_m <= 0.0:
+        return canopy_height
+    data = canopy_height.data
+    floored = np.where(np.isfinite(data) & (data <= floor_m), 0.0, data)
+    return canopy_height.copy_with(floored.astype(np.float32))
+
+
 def derive_bare_earth(
     dsm: RasterGrid,
     canopy_height: RasterGrid | None,

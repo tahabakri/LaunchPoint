@@ -83,6 +83,34 @@ class CanopyConfig:
     min_launch_weight: float = 0.15
     """Floor on the launch-feasibility weight — operators do use forest edges."""
 
+    ground_floor_m: float | None = None
+    """Canopy at/below this height is treated as bare ground (0 m).
+
+    The two canopy products disagree on what "no canopy" means. The Meta/WRI 1 m
+    model reads ~0 over open ground, but the ETH 10 m model carries a documented
+    positive bias over non-forest / low vegetation — fields, grass and "bald"
+    forest gaps read a few metres instead of 0. Left uncorrected that phantom
+    canopy is subtracted from the DSM in ``derive_bare_earth``, sinking bare earth
+    (and with it the operator's antenna) below the true surface, so exactly those
+    open cells become self-occluded and drop out of the heatmap.
+
+    Zeroing sub-floor heights removes the bias without touching real forest (tall
+    canopy is far above any sane floor) and also matches physics: sub-few-metre
+    vegetation neither occludes a drone nor blocks a standing operator. ``None``
+    picks a source-appropriate default (see ``effective_ground_floor_m``): ~3 m
+    for ETH, 0 m for Meta (which needs none)."""
+
+    def effective_ground_floor_m(self, canopy_source: str) -> float:
+        """Resolve the ground-floor cutoff for ``canopy_source``.
+
+        Honours an explicit ``ground_floor_m`` override; otherwise applies the
+        per-source default that cancels the ETH low-vegetation bias while leaving
+        the near-zero Meta product untouched.
+        """
+        if self.ground_floor_m is not None:
+            return self.ground_floor_m
+        return 3.0 if canopy_source == "eth" else 0.0
+
 
 @dataclass
 class Config:

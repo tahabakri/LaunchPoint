@@ -24,7 +24,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gpu = ["cupy-cuda12x>=12.0"]
+# The CUDA viewshed uses numba.cuda, which needs the maintained numba-cuda
+# target plus the CUDA 12 toolkit wheels (NVVM + cudart) it JITs against. The
+# [cu12] extra pulls those in and auto-discovers them inside a plain venv — the
+# bundled numba.cuda target does not find pip-installed CUDA on Windows.
+gpu = ["numba-cuda[cu12]>=0.30"]
 dev = ["pytest>=7.4", "pytest-cov>=4.1"]
 
 [project.scripts]

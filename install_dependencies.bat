@@ -75,11 +75,33 @@ echo Installing LaunchPoint ^(editable^) ...
 "%VENV_PY%" -m pip install -e .
 if errorlevel 1 ( echo ERROR: package install failed. & exit /b 1 )
 
+REM --- 3b. Optional GPU acceleration (NVIDIA GPUs only) ----------------------
+REM  The CUDA viewshed needs numba-cuda + the CUDA 12 toolkit wheels (the [gpu]
+REM  extra). We only install it when an NVIDIA GPU is actually present, and a
+REM  failure here is non-fatal: LaunchPoint runs identically (just slower) on the
+REM  CPU kernel, so a machine without an NVIDIA card installs cleanly.
+echo.
+where nvidia-smi >nul 2>&1
+if errorlevel 1 (
+    echo No NVIDIA GPU detected ^(nvidia-smi not found^) - skipping GPU acceleration.
+    echo LaunchPoint will use the CPU viewshed, which is fully supported.
+) else (
+    echo NVIDIA GPU detected - installing CUDA viewshed acceleration ^(~150 MB^) ...
+    "%VENV_PY%" -m pip install -e ".[gpu]"
+    if errorlevel 1 (
+        echo WARNING: GPU acceleration install failed - continuing on CPU only.
+        echo          You can retry later with:  .venv\Scripts\pip install -e ".[gpu]"
+    )
+)
+
 REM --- 4. Smoke test ---------------------------------------------------------
 echo.
 echo Verifying the install ...
 "%VENV_PY%" -c "import numpy, rasterio, pyproj, shapely, geopandas, numba, launchpoint; print('LaunchPoint', launchpoint.__version__, 'ready; GDAL', rasterio.__gdal_version__)"
 if errorlevel 1 ( echo ERROR: import check failed. & exit /b 1 )
+
+REM  Report the viewshed backend (non-fatal - CPU is a valid outcome).
+"%VENV_PY%" -c "from launchpoint.viewshed.gpu import gpu_status; ok, msg = gpu_status(); print('GPU acceleration: ' + msg if ok else 'GPU acceleration: off (CPU mode) - ' + msg)"
 
 echo.
 echo ===========================================================================

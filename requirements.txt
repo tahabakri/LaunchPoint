@@ -16,5 +16,7 @@ pytest>=7.4
 pytest-cov>=4.1
 
 # Optional GPU acceleration for the viewshed kernel (Phase 5).
-# Requires an NVIDIA GPU + CUDA 12 toolkit. Uncomment to enable:
-# cupy-cuda12x>=12.0
+# Requires an NVIDIA GPU (compute capability >= 5.0). The [cu12] extra bundles
+# the CUDA 12 toolkit wheels (NVVM + cudart) the kernel JITs against, so no
+# system-wide CUDA install is needed. Uncomment to enable:
+# numba-cuda[cu12]>=0.30

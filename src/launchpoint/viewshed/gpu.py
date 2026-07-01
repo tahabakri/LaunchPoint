@@ -13,27 +13,61 @@ surface is just ``r3_viewshed_best`` / ``gpu_available``.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
 from launchpoint.viewshed.kernels import r3_viewshed as _r3_cpu
+
+log = logging.getLogger("launchpoint")
 
 try:  # numba.cuda is optional and may not have a usable device.
     from numba import cuda
 
     _CUDA_IMPORTED = True
-except Exception:  # noqa: BLE001
+    _IMPORT_ERROR = ""
+except Exception as exc:  # noqa: BLE001
     cuda = None  # type: ignore
     _CUDA_IMPORTED = False
+    _IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
+
+
+def gpu_status() -> tuple[bool, str]:
+    """``(available, reason)`` — whether the CUDA viewshed can run, and why not.
+
+    The GPU kernel needs three things to line up: the ``numba.cuda`` bindings
+    (the ``numba-cuda`` package), the CUDA toolkit compiler/runtime libraries it
+    JITs against (NVVM + cudart, shipped by the ``nvidia-*-cu12`` wheels that
+    ``numba-cuda[cu12]`` pulls in), and a usable device. Any missing piece leaves
+    the app on the (correct, identical) CPU kernel; this reports which one so the
+    fallback is never a silent mystery.
+    """
+    if not _CUDA_IMPORTED:
+        return False, (
+            f"numba.cuda import failed ({_IMPORT_ERROR}); install the GPU extra: "
+            "pip install 'launchpoint[gpu]'"
+        )
+    try:
+        if not cuda.is_available():
+            # A device may be visible to the driver yet unusable because the CUDA
+            # toolkit libraries (NVVM/cudart) aren't found — the usual venv cause.
+            return False, (
+                "no usable CUDA device (driver present but the CUDA toolkit "
+                "libraries may be missing — install 'launchpoint[gpu]')"
+            )
+        if len(cuda.gpus) == 0:
+            return False, "CUDA available but no GPUs enumerated"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"CUDA probe raised {type(exc).__name__}: {exc}"
+    name = cuda.get_current_device().name
+    if isinstance(name, bytes):
+        name = name.decode(errors="replace")
+    return True, f"CUDA device ready ({name})"
 
 
 def gpu_available() -> bool:
     """True iff a CUDA device is present and usable."""
-    if not _CUDA_IMPORTED:
-        return False
-    try:
-        return bool(cuda.is_available()) and len(cuda.gpus) > 0
-    except Exception:  # noqa: BLE001
-        return False
+    return gpu_status()[0]
 
 
 if _CUDA_IMPORTED:
@@ -120,11 +154,22 @@ def r3_viewshed_gpu(occ, ground, obs_r, obs_c, obs_z, target_h, res,
     return d_out.copy_to_host()
 
 
+_WARNED_NO_GPU = False
+
+
 def r3_viewshed_best(occ, ground, obs_r, obs_c, obs_z, target_h, res,
                      inv_two_reff, max_range, prefer_gpu: bool = True):
     """Run on the GPU when available and requested, else the CPU kernel."""
-    if prefer_gpu and gpu_available():
-        return r3_viewshed_gpu(occ, ground, obs_r, obs_c, obs_z, target_h, res,
-                               inv_two_reff, max_range)
+    if prefer_gpu:
+        available, reason = gpu_status()
+        if available:
+            return r3_viewshed_gpu(occ, ground, obs_r, obs_c, obs_z, target_h, res,
+                                   inv_two_reff, max_range)
+        # Requested but unusable: warn once (not per viewshed) so the fallback to
+        # the CPU kernel is visible rather than silent — the reported symptom.
+        global _WARNED_NO_GPU
+        if not _WARNED_NO_GPU:
+            log.warning("GPU requested but unavailable — using CPU kernel. %s", reason)
+            _WARNED_NO_GPU = True
     return _r3_cpu(occ, ground, obs_r, obs_c, obs_z, target_h, res,
                    inv_two_reff, max_range)
