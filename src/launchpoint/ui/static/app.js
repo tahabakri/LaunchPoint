@@ -16,15 +16,26 @@ import { castViewshedFan, observerElevation } from "./raycast.js";
 
 const OSM_TEMPLATE = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 const DEFAULT_STAGES = ["Prepare AOI", "Fetch surfaces", "Run fusion", "Serialize result", "Export ready"];
+const REVERSE_STAGES = [
+  "Prepare AOI",
+  "Fetch surfaces",
+  "Search candidates",
+  "Refine hot patches",
+  "Serialize result",
+  "Export ready",
+];
 
 const state = {
   map: null,
   terrain: null,
+  mode: "forward",
   sightings: [],
   selectedSighting: null,
   selectedCell: null,
   inspectorLocked: false,
   addingPin: false,
+  zone: null,
+  addingZone: null,
   analysis: null,
   overlays: {
     heatmap: null,
@@ -32,6 +43,8 @@ const state = {
     diagnostic: null,
     markers: null,
     rays: null,
+    zone: null,
+    zonePreview: null,
   },
   diagnosticRequestId: 0,
   layers: {
@@ -45,6 +58,10 @@ const state = {
   tileSources: {
     map: OSM_TEMPLATE,
     terrain: "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png",
+  },
+  reverseDefaults: {
+    flightAltitudeM: 100.0,
+    radiusM: 300.0,
   },
 };
 
@@ -60,6 +77,7 @@ function init() {
   refreshIcons();
   fetchDefaults();
   renderSightings();
+  renderZoneFields();
   updateRunReadiness();
 }
 
@@ -71,13 +89,25 @@ function cacheElements() {
     "fileInput",
     "sightingCount",
     "sightingList",
+    "sightingsSection",
+    "zoneSection",
+    "drawZoneButton",
+    "clearZoneButton",
+    "zoneFields",
+    "zoneMessage",
     "maxRangeInput",
+    "forwardAdvancedFields",
+    "reverseAdvancedFields",
     "samplesInput",
     "combineSelect",
+    "coverageThresholdInput",
+    "candidateCoarseStrideInput",
+    "candidateFineStrideInput",
     "antennaInput",
     "gpuInput",
     "canopyInput",
     "canopySourceSelect",
+    "resolutionField",
     "resolutionSelect",
     "resolutionHint",
     "buildingsInput",
@@ -89,8 +119,14 @@ function cacheElements() {
     "runProgressBar",
     "runMessage",
     "rayModeSelect",
+    "metric1Label",
     "mostLikelyValue",
+    "credibleMetric",
     "credibleAreaValue",
+    "minVisibilityMetric",
+    "minVisibilityValue",
+    "fracCoveredMetric",
+    "fracCoveredValue",
     "runStateBadge",
     "limitationsNote",
     "exportTiffButton",
@@ -109,6 +145,9 @@ function cacheElements() {
     "terrainBuildingsInput",
     "terrainCanopyInput",
     "reloadTerrainButton",
+    "heatmapToggle",
+    "credibleToggle",
+    "sightingsToggle",
   ].forEach((id) => {
     el[id] = document.getElementById(id);
   });
@@ -187,9 +226,14 @@ function bindEvents() {
   el.terrainCanopyInput.addEventListener("change", syncTerrainState);
   el.reloadTerrainButton.addEventListener("click", loadTerrainForCurrentView);
 
-  document.querySelectorAll(".segment").forEach((button) => {
+  document.querySelectorAll(".topbar .segment").forEach((button) => {
     button.addEventListener("click", () => switchView(button.dataset.view));
   });
+  document.querySelectorAll(".mode-switch .segment").forEach((button) => {
+    button.addEventListener("click", () => setMode(button.dataset.mode));
+  });
+  el.drawZoneButton.addEventListener("click", startDrawZone);
+  el.clearZoneButton.addEventListener("click", clearZone);
   document.querySelectorAll(".layer-toggle").forEach((button) => {
     button.addEventListener("click", () => {
       const layer = button.dataset.layer;
@@ -251,12 +295,49 @@ async function fetchDefaults() {
       el.antennaInput.value = payload.settings.antennaHeightM ?? el.antennaInput.value;
       el.gpuInput.checked = payload.settings.preferGpu !== false;
     }
+    if (payload.reverseSettings) {
+      const rs = payload.reverseSettings;
+      state.reverseDefaults.flightAltitudeM = rs.flightAltitudeM ?? state.reverseDefaults.flightAltitudeM;
+      state.reverseDefaults.radiusM = rs.radiusM ?? state.reverseDefaults.radiusM;
+      el.coverageThresholdInput.value = rs.coverageThreshold ?? el.coverageThresholdInput.value;
+      el.candidateCoarseStrideInput.value = rs.candidateCoarseStrideM ?? el.candidateCoarseStrideInput.value;
+      el.candidateFineStrideInput.value = rs.candidateFineStrideM ?? el.candidateFineStrideInput.value;
+    }
   } catch {
     // Defaults are already embedded for offline UI startup.
   }
 }
 
 function handleMapClick(event) {
+  if (state.mode === "reverse" && state.addingZone) {
+    if (state.addingZone === "center") {
+      state.zone = normalizeZone({
+        center_lat: event.latlng.lat,
+        center_lon: event.latlng.lng,
+        radius_m: state.zone?.radius_m ?? state.reverseDefaults.radiusM,
+        flight_altitude_m: state.zone?.flight_altitude_m ?? state.reverseDefaults.flightAltitudeM,
+      });
+      state.addingZone = "radius";
+      el.zoneMessage.textContent = "Move the mouse to size the zone, then click to confirm.";
+      renderZoneFields();
+      renderZoneOverlay();
+      return;
+    }
+    // state.addingZone === "radius"
+    state.zone.radius_m = Math.max(
+      distanceMeters(
+        { lat: state.zone.center_lat, lon: state.zone.center_lon },
+        { lat: event.latlng.lat, lon: event.latlng.lng }
+      ),
+      10
+    );
+    state.addingZone = null;
+    el.drawZoneButton.classList.remove("active");
+    renderZoneFields();
+    renderZoneOverlay();
+    updateRunReadiness();
+    return;
+  }
   if (state.addingPin) {
     addSighting({
       label: `S${state.sightings.length + 1}`,
@@ -280,6 +361,14 @@ function handleMapClick(event) {
 }
 
 function handleMapHover(event) {
+  if (state.mode === "reverse" && state.addingZone === "radius" && state.zone) {
+    const radius = distanceMeters(
+      { lat: state.zone.center_lat, lon: state.zone.center_lon },
+      { lat: event.latlng.lat, lon: event.latlng.lng }
+    );
+    renderZoneOverlay(radius);
+    return;
+  }
   if (!state.analysis || state.inspectorLocked) return;
   updateInspector(event.latlng);
 }
@@ -304,6 +393,166 @@ function clearSightings() {
   renderRays();
   resetResults();
   updateRunReadiness();
+}
+
+function setMode(mode) {
+  if (mode === state.mode) return;
+  state.mode = mode;
+  state.addingPin = false;
+  state.addingZone = null;
+  state.analysis = null;
+  state.selectedCell = null;
+  state.inspectorLocked = false;
+  el.addPinButton.classList.remove("active");
+  el.drawZoneButton.classList.remove("active");
+
+  document.querySelectorAll(".mode-switch .segment").forEach((button) => {
+    button.classList.toggle("active", button.dataset.mode === mode);
+  });
+  el.sightingsSection.hidden = mode !== "forward";
+  el.zoneSection.hidden = mode !== "reverse";
+  el.forwardAdvancedFields.hidden = mode !== "forward";
+  el.reverseAdvancedFields.hidden = mode !== "reverse";
+  el.resolutionField.hidden = mode !== "forward";
+  el.credibleToggle.hidden = mode !== "forward";
+  el.credibleMetric.hidden = mode !== "forward";
+  el.minVisibilityMetric.hidden = mode !== "reverse";
+  el.fracCoveredMetric.hidden = mode !== "reverse";
+  el.metric1Label.textContent = mode === "reverse" ? "Best launch point" : "Most likely";
+  el.heatmapToggle.textContent = mode === "reverse" ? "Coverage" : "Heatmap";
+  el.sightingsToggle.textContent = mode === "reverse" ? "Zone" : "Sightings";
+  el.limitationsNote.textContent = mode === "reverse"
+    ? "Score is the weakest-covered point in the flight zone. A low score means part of the zone is out of view from every nearby candidate."
+    : "Probability is a likelihood surface. Sparse sightings and weak terrain data widen the credible region.";
+
+  clearRasterOverlays();
+  renderMarkers();
+  renderZoneOverlay();
+  renderRays();
+  resetResults();
+  updateRunReadiness();
+  syncTerrainState();
+}
+
+function normalizeZone(raw) {
+  return {
+    label: raw.label || "Flight zone",
+    center_lat: Number(raw.center_lat),
+    center_lon: Number(raw.center_lon ?? raw.center_lng),
+    radius_m: Number(raw.radius_m),
+    flight_altitude_m: Number(raw.flight_altitude_m),
+  };
+}
+
+function isFiniteZone(zone) {
+  return Boolean(zone) && [zone.center_lat, zone.center_lon, zone.radius_m, zone.flight_altitude_m]
+    .every(Number.isFinite) && zone.radius_m > 0;
+}
+
+function startDrawZone() {
+  state.addingZone = state.addingZone ? null : "center";
+  el.drawZoneButton.classList.toggle("active", Boolean(state.addingZone));
+  el.zoneMessage.textContent = state.addingZone
+    ? "Click the map to place the zone center."
+    : zoneStatusText();
+}
+
+function clearZone() {
+  state.zone = null;
+  state.addingZone = null;
+  state.analysis = null;
+  el.drawZoneButton.classList.remove("active");
+  clearRasterOverlays();
+  renderZoneFields();
+  renderZoneOverlay();
+  resetResults();
+  updateRunReadiness();
+}
+
+function renderZoneFields() {
+  const zone = state.zone || {
+    center_lat: "", center_lon: "",
+    radius_m: state.reverseDefaults.radiusM,
+    flight_altitude_m: state.reverseDefaults.flightAltitudeM,
+  };
+  el.zoneFields.innerHTML = `
+    <div class="sighting-grid">
+      ${numberField(0, "center_lat", "Lat", zone.center_lat, "0.000001")}
+      ${numberField(0, "center_lon", "Lon", zone.center_lon, "0.000001")}
+      ${numberField(0, "radius_m", "Radius m", zone.radius_m, "10")}
+      ${numberField(0, "flight_altitude_m", "Flight alt m (AGL)", zone.flight_altitude_m, "1")}
+    </div>
+  `;
+  el.zoneFields.querySelectorAll("input").forEach((input) => {
+    input.addEventListener("input", handleZoneInput);
+  });
+}
+
+function handleZoneInput(event) {
+  const field = event.currentTarget.dataset.field;
+  const value = Number(event.currentTarget.value);
+  const base = state.zone || {
+    center_lat: NaN, center_lon: NaN,
+    radius_m: state.reverseDefaults.radiusM,
+    flight_altitude_m: state.reverseDefaults.flightAltitudeM,
+  };
+  state.zone = normalizeZone({ ...base, [field]: value });
+  renderZoneOverlay();
+  updateRunReadiness();
+}
+
+function renderZoneOverlay(previewRadius = null) {
+  if (state.overlays.zone) {
+    state.map.removeLayer(state.overlays.zone);
+    state.overlays.zone = null;
+  }
+  if (state.overlays.zonePreview) {
+    state.map.removeLayer(state.overlays.zonePreview);
+    state.overlays.zonePreview = null;
+  }
+  if (state.mode !== "reverse" || !state.zone || !isFiniteZone(state.zone)) return;
+
+  const group = L.layerGroup();
+  L.circle([state.zone.center_lat, state.zone.center_lon], {
+    radius: state.zone.radius_m,
+    pane: "overlayPane",
+    color: "#55d6c2",
+    weight: 2,
+    opacity: 0.75,
+    fillOpacity: 0.08,
+  }).addTo(group);
+
+  const marker = L.marker([state.zone.center_lat, state.zone.center_lon], {
+    draggable: true,
+    icon: L.divIcon({
+      className: "",
+      html: `<div class="map-marker">Z</div>`,
+      iconSize: [28, 28],
+      iconAnchor: [14, 14],
+    }),
+  });
+  marker.on("dragend", (event) => {
+    const latlng = event.target.getLatLng();
+    state.zone.center_lat = latlng.lat;
+    state.zone.center_lon = latlng.lng;
+    renderZoneFields();
+    renderZoneOverlay();
+  });
+  marker.addTo(group);
+  group.addTo(state.map);
+  state.overlays.zone = group;
+
+  if (previewRadius !== null) {
+    state.overlays.zonePreview = L.circle([state.zone.center_lat, state.zone.center_lon], {
+      radius: previewRadius,
+      pane: "overlayPane",
+      color: "#55d6c2",
+      weight: 1,
+      opacity: 0.4,
+      fill: false,
+      dashArray: "4 6",
+    }).addTo(state.map);
+  }
 }
 
 function normalizeSighting(raw, index) {
@@ -400,7 +649,7 @@ function renderMarkers() {
     state.map.removeLayer(state.overlays.markers);
     state.overlays.markers = null;
   }
-  if (!state.layers.sightings) return;
+  if (state.mode !== "forward" || !state.layers.sightings) return;
 
   const group = L.layerGroup();
   state.sightings.forEach((sighting, index) => {
@@ -445,8 +694,13 @@ function renderRays() {
     state.map.removeLayer(state.overlays.rays);
     state.overlays.rays = null;
   }
-  const mode = el.rayModeSelect.value;
-  if (mode === "off" || state.selectedSighting === null || !state.sightings[state.selectedSighting]) {
+  const rayMode = el.rayModeSelect.value;
+  if (
+    state.mode !== "forward" ||
+    rayMode === "off" ||
+    state.selectedSighting === null ||
+    !state.sightings[state.selectedSighting]
+  ) {
     return;
   }
   const sighting = state.sightings[state.selectedSighting];
@@ -544,10 +798,13 @@ async function updateRasterOverlays() {
   if (!analysis) return;
   const requestId = state.diagnosticRequestId;
 
+  const isReverse = state.mode === "reverse";
   const contributionIndex = el.contributionSelect.value;
-  const baseRaster = contributionIndex === ""
-    ? analysis.probability
-    : analysis.perSighting[Number(contributionIndex)]?.raster;
+  const baseRaster = isReverse
+    ? analysis.coverage
+    : contributionIndex === ""
+      ? analysis.probability
+      : analysis.perSighting[Number(contributionIndex)]?.raster;
 
   const fallbackDiagnostic = state.activeDiagnostic
     ? analysis.surfaceLayers[state.activeDiagnostic]
@@ -557,7 +814,7 @@ async function updateRasterOverlays() {
   if (state.layers.probability && baseRaster) {
     state.overlays.heatmap = L.imageOverlay(
       rasterToDataUrl(baseRaster, {
-        kind: contributionIndex === "" ? "probability" : "contribution",
+        kind: isReverse ? "coverage" : contributionIndex === "" ? "probability" : "contribution",
         opacity: 1,
       }),
       leafletBounds(baseRaster),
@@ -565,7 +822,7 @@ async function updateRasterOverlays() {
     ).addTo(state.map);
   }
 
-  if (state.layers.credible && analysis.credibleRegion?.mask) {
+  if (!isReverse && state.layers.credible && analysis.credibleRegion?.mask) {
     const mask = analysis.credibleRegion.mask;
     state.overlays.credible = L.imageOverlay(
       rasterToDataUrl(mask, { kind: "credible", opacity: 1 }),
@@ -664,7 +921,7 @@ async function handleImport(event) {
 }
 
 async function runAnalysis() {
-  if (!validSightings()) return;
+  if (!canRun()) return;
   state.inspectorLocked = false;
   setRunState("Running", "Starting analysis...");
   setTimelineRunning();
@@ -673,14 +930,17 @@ async function runAnalysis() {
   el.runButton.disabled = true;
   let hadError = false;
 
+  const isReverse = state.mode === "reverse";
+  const endpoint = isReverse ? "/api/runs/launch" : "/api/runs";
+  const body = isReverse
+    ? { zone: state.zone, settings: readSettings() }
+    : { sightings: state.sightings, settings: readSettings() };
+
   try {
-    const startResponse = await fetch("/api/runs", {
+    const startResponse = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sightings: state.sightings,
-        settings: readSettings(),
-      }),
+      body: JSON.stringify(body),
     });
     const startPayload = await startResponse.json();
     if (!startResponse.ok) throw new Error(startPayload.error || "Analysis failed");
@@ -690,7 +950,7 @@ async function runAnalysis() {
     const payload = await waitForRunResult(runId);
 
     state.analysis = payload;
-    state.selectedCell = payload.mostLikely;
+    state.selectedCell = isReverse ? payload.bestLaunchPoint : payload.mostLikely;
     setRunState("Complete", `Completed in ${Math.round(payload.metadata.elapsedMs / 1000)}s.`);
     setProgressValue(1);
     updateTimeline(payload.metadata.stages);
@@ -701,7 +961,8 @@ async function runAnalysis() {
     renderRays();
     el.exportTiffButton.disabled = false;
     el.exportPngButton.disabled = false;
-    state.map.fitBounds(leafletBounds(payload.probability), { padding: [36, 36] });
+    const boundsRaster = isReverse ? payload.coverage : payload.probability;
+    state.map.fitBounds(leafletBounds(boundsRaster), { padding: [36, 36] });
     syncTerrainState();
   } catch (error) {
     hadError = true;
@@ -756,12 +1017,19 @@ function readSettings() {
     use_buildings: el.buildingsInput.checked,
     use_cache: el.cacheInput.checked,
     override_cell_limit: el.overrideSizeInput.checked,
+    coverage_threshold: Number(el.coverageThresholdInput.value),
+    candidate_coarse_stride_m: Number(el.candidateCoarseStrideInput.value),
+    candidate_fine_stride_m: Number(el.candidateFineStrideInput.value),
   };
 }
 
 function updateResults() {
   const analysis = state.analysis;
   if (!analysis) return;
+  if (state.mode === "reverse") {
+    updateReverseResults(analysis);
+    return;
+  }
   el.mostLikelyValue.textContent = `${formatCoord(analysis.mostLikely.lat)}, ${formatCoord(analysis.mostLikely.lon)}`;
   el.credibleAreaValue.textContent = formatArea(analysis.credibleRegion.areaKm2);
   const layers = analysis.metadata.layers || {};
@@ -778,6 +1046,29 @@ function updateResults() {
     ${metadataRow("Cache", analysis.metadata.cacheDir)}
   `;
   updateInspector({ lat: analysis.mostLikely.lat, lng: analysis.mostLikely.lon });
+}
+
+function updateReverseResults(analysis) {
+  const best = analysis.bestLaunchPoint;
+  el.mostLikelyValue.textContent = `${formatCoord(best.lat)}, ${formatCoord(best.lon)}`;
+  el.minVisibilityValue.textContent = formatProbability(best.minVisibility);
+  el.fracCoveredValue.textContent = formatProbability(best.fracCovered);
+  const layers = analysis.metadata.layers || {};
+  const aoi = analysis.metadata.aoi || {};
+  el.metadataList.innerHTML = `
+    ${metadataRow("Flight altitude", formatMeters(analysis.metadata.flightAltitudeM))}
+    ${metadataRow("Zone radius", formatMeters(analysis.metadata.zoneRadiusM))}
+    ${metadataRow("Max range", formatMeters(analysis.metadata.maxRangeM))}
+    ${metadataRow("Mode", analysis.metadata.gpuMode)}
+    ${metadataRow("Candidates evaluated", analysis.metadata.candidatesEvaluated?.toLocaleString?.() ?? "-")}
+    ${metadataRow("Candidates skipped (out of range)", analysis.metadata.candidatesPrefiltered?.toLocaleString?.() ?? "-")}
+    ${metadataRow("AOI", aoi.widthM ? `${formatMeters(aoi.widthM)} x ${formatMeters(aoi.heightM)}` : "-")}
+    ${metadataRow("DSM", layers.dsm ? "loaded" : "missing")}
+    ${metadataRow("Canopy", layers.canopyHeight ? `loaded (${analysis.metadata.canopySource === "meta" ? "Meta 1 m" : "ETH 10 m"})` : "not available")}
+    ${metadataRow("Buildings", layers.buildingHeight ? "loaded" : "not available")}
+    ${metadataRow("Cache", analysis.metadata.cacheDir)}
+  `;
+  updateInspector({ lat: best.lat, lng: best.lon });
 }
 
 function metadataRow(label, value) {
@@ -799,6 +1090,10 @@ function updateInspector(latlng) {
   if (!analysis) return;
   const lat = latlng.lat;
   const lon = latlng.lng ?? latlng.lon;
+  if (state.mode === "reverse") {
+    updateReverseInspector(analysis, lat, lon);
+    return;
+  }
   const prob = rasterValueAt(analysis.probability, lat, lon);
   const dsm = rasterValueAt(analysis.surfaceLayers.dsm, lat, lon);
   const bare = rasterValueAt(analysis.surfaceLayers.bareEarth, lat, lon);
@@ -818,6 +1113,29 @@ function updateInspector(latlng) {
     ${inspectorRow("Probability", formatProbability(prob))}
     ${inspectorRow("Selected path", pathState)}
     ${inspectorRow("Range", formatMeters(range))}
+    ${inspectorRow("DSM", formatMeters(dsm))}
+    ${inspectorRow("Bare earth", formatMeters(bare))}
+    ${inspectorRow("Canopy", formatMeters(canopy))}
+    ${inspectorRow("Building", formatMeters(building))}
+    ${inspectorRow("Launch weight", launch === null ? "-" : launch.toFixed(2))}
+  `;
+}
+
+function updateReverseInspector(analysis, lat, lon) {
+  const score = rasterValueAt(analysis.coverage, lat, lon);
+  const minVis = rasterValueAt(analysis.minVisibility, lat, lon);
+  const frac = rasterValueAt(analysis.fracCovered, lat, lon);
+  const dsm = rasterValueAt(analysis.surfaceLayers.dsm, lat, lon);
+  const bare = rasterValueAt(analysis.surfaceLayers.bareEarth, lat, lon);
+  const canopy = rasterValueAt(analysis.surfaceLayers.canopyHeight, lat, lon);
+  const building = rasterValueAt(analysis.surfaceLayers.buildingHeight, lat, lon);
+  const launch = rasterValueAt(analysis.surfaceLayers.launchWeight, lat, lon);
+
+  el.inspectorBody.innerHTML = `
+    ${inspectorRow("Lat/Lon", `${formatCoord(lat)}, ${formatCoord(lon)}`)}
+    ${inspectorRow("Launch coverage score", formatProbability(score))}
+    ${inspectorRow("Min visibility", formatProbability(minVis))}
+    ${inspectorRow("Zone covered", formatProbability(frac))}
     ${inspectorRow("DSM", formatMeters(dsm))}
     ${inspectorRow("Bare earth", formatMeters(bare))}
     ${inspectorRow("Canopy", formatMeters(canopy))}
@@ -853,18 +1171,23 @@ function setProgressValue(value) {
   el.runProgressBar.style.width = `${Math.round(percent * 100)}%`;
 }
 
+function currentStages() {
+  return state.mode === "reverse" ? REVERSE_STAGES : DEFAULT_STAGES;
+}
+
 function setTimelineRunning() {
-  ensureTimelineRows(DEFAULT_STAGES);
+  const stages = currentStages();
+  ensureTimelineRows(stages);
   Array.from(el.timeline.children).forEach((item, index) => {
     item.className = index === 0 ? "running" : "pending";
-    item.querySelector("span").textContent = DEFAULT_STAGES[index] || "Stage";
+    item.querySelector("span").textContent = stages[index] || "Stage";
     item.querySelector("time").textContent = "-";
     item.title = "";
   });
 }
 
 function updateTimeline(stages) {
-  const names = [...DEFAULT_STAGES];
+  const names = [...currentStages()];
   stages.forEach((stage) => {
     if (!names.includes(stage.name)) names.push(stage.name);
   });
@@ -910,6 +1233,8 @@ function markTimelineError() {
 function resetResults() {
   el.mostLikelyValue.textContent = "-";
   el.credibleAreaValue.textContent = "-";
+  el.minVisibilityValue.textContent = "-";
+  el.fracCoveredValue.textContent = "-";
   el.runStateBadge.textContent = "Idle";
   el.exportTiffButton.disabled = true;
   el.exportPngButton.disabled = true;
@@ -921,8 +1246,22 @@ function resetResults() {
   updateContributionOptions();
 }
 
+function canRun() {
+  return state.mode === "reverse" ? isFiniteZone(state.zone) : validSightings();
+}
+
 function updateRunReadiness() {
-  el.runButton.disabled = !validSightings();
+  el.runButton.disabled = !canRun();
+  if (state.mode === "reverse") {
+    if (!state.zone) {
+      el.runMessage.textContent = "Draw a flight zone or enter coordinates.";
+    } else if (!isFiniteZone(state.zone)) {
+      el.runMessage.textContent = "Check zone coordinates, radius and altitude values.";
+    } else if (!state.analysis) {
+      el.runMessage.textContent = zoneStatusText();
+    }
+    return;
+  }
   if (!state.sightings.length) {
     el.runMessage.textContent = "Add a sighting or import a file.";
   } else if (!validSightings()) {
@@ -934,6 +1273,10 @@ function updateRunReadiness() {
 
 function statusText() {
   return `${state.sightings.length} sighting${state.sightings.length === 1 ? "" : "s"} ready.`;
+}
+
+function zoneStatusText() {
+  return "Flight zone ready.";
 }
 
 function fitSightings() {
@@ -959,7 +1302,7 @@ function isFiniteSighting(sighting) {
 
 function switchView(view) {
   state.activeView = view;
-  document.querySelectorAll(".segment").forEach((button) => {
+  document.querySelectorAll(".topbar .segment").forEach((button) => {
     button.classList.toggle("active", button.dataset.view === view);
   });
   document.querySelectorAll(".stage-view").forEach((stage) => {
@@ -1040,17 +1383,20 @@ async function exportPngPreview() {
 
 async function drawVisiblePreviewLayers(ctx, viewBounds, zoom, canvas) {
   const analysis = state.analysis;
+  const isReverse = state.mode === "reverse";
   const contributionIndex = el.contributionSelect.value;
-  const baseRaster = contributionIndex === ""
-    ? analysis.probability
-    : analysis.perSighting[Number(contributionIndex)]?.raster;
+  const baseRaster = isReverse
+    ? analysis.coverage
+    : contributionIndex === ""
+      ? analysis.probability
+      : analysis.perSighting[Number(contributionIndex)]?.raster;
   if (state.layers.probability && baseRaster) {
     drawRasterInView(ctx, baseRaster, viewBounds, zoom, canvas, {
-      kind: contributionIndex === "" ? "probability" : "contribution",
+      kind: isReverse ? "coverage" : contributionIndex === "" ? "probability" : "contribution",
       opacity: 1,
     });
   }
-  if (state.layers.credible) {
+  if (!isReverse && state.layers.credible && analysis.credibleRegion?.mask) {
     drawRasterInView(ctx, analysis.credibleRegion.mask, viewBounds, zoom, canvas, {
       kind: "credible",
       opacity: 1,
@@ -1065,10 +1411,11 @@ async function drawVisiblePreviewLayers(ctx, viewBounds, zoom, canvas) {
       solid: true,
     });
   }
-  if (state.layers.sightings) {
+  if (!isReverse && state.layers.sightings) {
     drawSightings(ctx, state.sightings, viewBounds, zoom, canvas, state.selectedSighting);
   }
-  drawMostLikely(ctx, analysis.mostLikely, viewBounds, zoom, canvas);
+  const bestPoint = isReverse ? analysis.bestLaunchPoint : analysis.mostLikely;
+  drawMostLikely(ctx, bestPoint, viewBounds, zoom, canvas);
 }
 
 function downloadCanvas(canvas, filename) {

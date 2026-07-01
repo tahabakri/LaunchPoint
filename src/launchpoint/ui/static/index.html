@@ -23,7 +23,12 @@
           </div>
         </header>
 
-        <section class="panel-section">
+        <div class="segmented mode-switch" role="tablist" aria-label="Analysis mode">
+          <button class="segment active" data-mode="forward" type="button">Find controller</button>
+          <button class="segment" data-mode="reverse" type="button">Find launch area</button>
+        </div>
+
+        <section id="sightingsSection" class="panel-section">
           <div class="section-head">
             <h2>Sightings</h2>
             <span id="sightingCount" class="count-pill">0</span>
@@ -43,6 +48,23 @@
             <input id="fileInput" type="file" accept=".json,.csv,application/json,text/csv" hidden />
           </div>
           <div id="sightingList" class="sighting-list"></div>
+        </section>
+
+        <section id="zoneSection" class="panel-section" hidden>
+          <div class="section-head">
+            <h2>Flight zone</h2>
+          </div>
+          <div class="action-row">
+            <button id="drawZoneButton" class="control-button primary" type="button">
+              <i data-lucide="circle-dashed"></i>
+              <span>Draw zone</span>
+            </button>
+            <button id="clearZoneButton" class="icon-button danger" type="button" title="Clear zone">
+              <i data-lucide="trash-2"></i>
+            </button>
+          </div>
+          <div id="zoneFields"></div>
+          <p id="zoneMessage" class="status-message">Draw a circle on the map, or enter coordinates.</p>
         </section>
 
         <section class="panel-section">
@@ -71,18 +93,40 @@
             <span>Advanced</span>
             <i data-lucide="chevron-down"></i>
           </summary>
-          <label class="field">
-            <span>Monte Carlo samples</span>
-            <input id="samplesInput" type="number" min="1" step="1" value="64" />
-          </label>
-          <label class="field">
-            <span>Combine sightings</span>
-            <select id="combineSelect" class="select-control" aria-label="Combine mode">
-              <option value="min">Strict — every drone must see</option>
-              <option value="geometric_mean">Common area (soft)</option>
-              <option value="arithmetic_mean">Any reach (union)</option>
-            </select>
-          </label>
+          <div id="forwardAdvancedFields">
+            <label class="field">
+              <span>Monte Carlo samples</span>
+              <input id="samplesInput" type="number" min="1" step="1" value="64" />
+            </label>
+            <label class="field">
+              <span>Combine sightings</span>
+              <select id="combineSelect" class="select-control" aria-label="Combine mode">
+                <option value="min">Strict — every drone must see</option>
+                <option value="geometric_mean">Common area (soft)</option>
+                <option value="arithmetic_mean">Any reach (union)</option>
+              </select>
+            </label>
+          </div>
+          <div id="reverseAdvancedFields" hidden>
+            <label class="field">
+              <span>Coverage threshold</span>
+              <input id="coverageThresholdInput" type="number" min="0" max="1" step="0.05" value="0.5" />
+            </label>
+            <label class="field">
+              <span>Coarse candidate spacing</span>
+              <div class="input-with-unit">
+                <input id="candidateCoarseStrideInput" type="number" min="10" step="10" value="60" />
+                <span>m</span>
+              </div>
+            </label>
+            <label class="field">
+              <span>Fine candidate spacing</span>
+              <div class="input-with-unit">
+                <input id="candidateFineStrideInput" type="number" min="1" step="1" value="10" />
+                <span>m</span>
+              </div>
+            </label>
+          </div>
           <label class="field">
             <span>Antenna height</span>
             <div class="input-with-unit">
@@ -97,7 +141,7 @@
               <option value="meta">Meta 1 m — detailed, slow</option>
             </select>
           </label>
-          <label class="field">
+          <label id="resolutionField" class="field">
             <span>Model resolution</span>
             <select id="resolutionSelect" class="select-control" aria-label="Analysis resolution">
               <option value="30">30 m — coarse, fastest</option>
@@ -151,9 +195,9 @@
             </button>
           </div>
           <div class="layer-strip" aria-label="Layer controls">
-            <button class="layer-toggle active" data-layer="probability" type="button">Heatmap</button>
-            <button class="layer-toggle active" data-layer="credible" type="button">50%</button>
-            <button class="layer-toggle active" data-layer="sightings" type="button">Sightings</button>
+            <button id="heatmapToggle" class="layer-toggle active" data-layer="probability" type="button">Heatmap</button>
+            <button id="credibleToggle" class="layer-toggle active" data-layer="credible" type="button">50%</button>
+            <button id="sightingsToggle" class="layer-toggle active" data-layer="sightings" type="button">Sightings</button>
             <select id="rayModeSelect" class="select-control" aria-label="Ray mode">
               <option value="off">Rays off</option>
               <option value="fan">Viewshed rays</option>
@@ -205,12 +249,20 @@
           </div>
           <div class="metric-grid">
             <div class="metric">
-              <span>Most likely</span>
+              <span id="metric1Label">Most likely</span>
               <strong id="mostLikelyValue">-</strong>
             </div>
-            <div class="metric">
+            <div id="credibleMetric" class="metric">
               <span>50% area</span>
               <strong id="credibleAreaValue">-</strong>
+            </div>
+            <div id="minVisibilityMetric" class="metric" hidden>
+              <span>Min visibility</span>
+              <strong id="minVisibilityValue">-</strong>
+            </div>
+            <div id="fracCoveredMetric" class="metric" hidden>
+              <span>Zone covered</span>
+              <strong id="fracCoveredValue">-</strong>
             </div>
           </div>
           <p id="limitationsNote" class="note">

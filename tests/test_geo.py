@@ -3,9 +3,11 @@ import numpy as np
 from launchpoint.core.geo import (
     Projector,
     aoi_for_sightings,
+    aoi_for_target_zone,
     utm_epsg_for,
 )
 from launchpoint.core.sighting import Sighting
+from launchpoint.core.target_zone import TargetZone
 
 
 def test_utm_zone_selection():
@@ -39,3 +41,14 @@ def test_aoi_covers_sightings_plus_range():
         x, y = proj.to_utm(s.lon, s.lat)
         assert bbox.minx <= x <= bbox.maxx
         assert bbox.miny <= y <= bbox.maxy
+
+
+def test_aoi_for_target_zone_covers_disk_plus_range():
+    zone = TargetZone(center_lat=47.37, center_lon=8.55, radius_m=400.0, flight_altitude_m=80.0)
+    proj, bbox = aoi_for_target_zone(zone, max_range_m=12000.0)
+    cx, cy = proj.to_utm(zone.center_lon, zone.center_lat)
+    # The AOI must extend at least radius + range from the centre in every direction.
+    assert bbox.maxx - cx >= zone.radius_m + 12000.0
+    assert cx - bbox.minx >= zone.radius_m + 12000.0
+    assert bbox.maxy - cy >= zone.radius_m + 12000.0
+    assert cy - bbox.miny >= zone.radius_m + 12000.0

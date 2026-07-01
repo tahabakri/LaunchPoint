@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import dataclasses
 import json
 import mimetypes
 import os
@@ -21,11 +22,14 @@ import numpy as np
 from rasterio.io import MemoryFile
 
 from launchpoint.config import Config, DEFAULT_ANALYSIS_RESOLUTION_M, MonteCarloConfig
-from launchpoint.core.geo import BBox, Projector, aoi_for_sightings
+from launchpoint.core.geo import BBox, Projector, aoi_for_sightings, aoi_for_target_zone
 from launchpoint.core.grid import RasterGrid
 from launchpoint.core.sighting import Sighting
+from launchpoint.core.target_zone import TargetZone
 from launchpoint.data.surface import SurfaceStack, build_surface_stack
 from launchpoint.pipeline import OriginEstimate, find_origin
+from launchpoint.reverse.pipeline import find_launch_area
+from launchpoint.reverse.search import LaunchCoverageResult, LaunchSearchConfig
 
 
 MAX_SERIALIZED_GRID_DIM = 420
@@ -37,10 +41,13 @@ ALLOWED_ANALYSIS_RESOLUTIONS_M = {1.0, 2.0, 5.0, 10.0, 30.0}
 
 @dataclass
 class RunRecord:
-    estimate: OriginEstimate
-    sightings: list[Sighting]
     stack: SurfaceStack
     metadata: dict
+    run_type: str = "forward"
+    estimate: OriginEstimate | None = None
+    sightings: list[Sighting] | None = None
+    launch_result: LaunchCoverageResult | None = None
+    zone: TargetZone | None = None
 
 
 @dataclass
@@ -151,6 +158,20 @@ def _parse_sightings_payload(payload: dict | list) -> list[Sighting]:
     return sightings
 
 
+def _parse_target_zone_payload(payload: dict) -> TargetZone:
+    raw = payload.get("zone") if isinstance(payload, dict) else None
+    if not isinstance(raw, dict):
+        raise ValueError("zone must be an object")
+    label = raw.get("label")
+    return TargetZone(
+        center_lat=float(raw["center_lat"]),
+        center_lon=float(raw["center_lon"]),
+        radius_m=float(raw["radius_m"]),
+        flight_altitude_m=float(raw["flight_altitude_m"]),
+        label=str(label) if label else None,
+    )
+
+
 def _parse_csv_sightings(text: str) -> list[Sighting]:
     reader = csv.DictReader(StringIO(text))
     if not reader.fieldnames:
@@ -214,6 +235,23 @@ def _config_from_payload(payload: dict) -> tuple[Config, dict]:
     return config, layer_flags
 
 
+def _search_config_from_payload(payload: dict) -> LaunchSearchConfig:
+    settings = payload.get("settings", {}) if isinstance(payload, dict) else {}
+    defaults = LaunchSearchConfig()
+    return LaunchSearchConfig(
+        coverage_threshold=float(settings.get("coverage_threshold", defaults.coverage_threshold)),
+        candidate_coarse_stride_m=float(
+            settings.get("candidate_coarse_stride_m", defaults.candidate_coarse_stride_m)
+        ),
+        candidate_fine_stride_m=float(
+            settings.get("candidate_fine_stride_m", defaults.candidate_fine_stride_m)
+        ),
+        surface_resolution_m=float(
+            settings.get("surface_resolution_m", defaults.surface_resolution_m)
+        ),
+    )
+
+
 def _validate_analysis_resolution(
     resolution_m: float,
     *,
@@ -233,7 +271,11 @@ def _validate_analysis_resolution(
     return float(selected)
 
 
-def _aoi_details(bbox, resolution_m: float) -> dict:
+def _aoi_details(
+    bbox,
+    resolution_m: float,
+    description: str = "Bounding box of sightings padded by max range x 1.1",
+) -> dict:
     rows = max(1, int(np.ceil(bbox.height / resolution_m)))
     cols = max(1, int(np.ceil(bbox.width / resolution_m)))
     cells = rows * cols
@@ -246,7 +288,7 @@ def _aoi_details(bbox, resolution_m: float) -> dict:
         "estimatedCols": cols,
         "estimatedCells": cells,
         "rangeBufferMultiplier": 1.1,
-        "description": "Bounding box of sightings padded by max range x 1.1",
+        "description": description,
     }
 
 
@@ -380,6 +422,13 @@ def _stage_percent(stages: list[dict], status: str) -> float:
         total = max(int(details.get("total") or 0), 1)
         current = min(max(int(details.get("current") or 1), 1), total)
         return 0.35 + 0.55 * ((current - 1) / total)
+    refine = stages_by_name.get("Refine hot patches")
+    if refine:
+        return 0.9 if refine.get("status") == "complete" else 0.75
+    if stages_by_name.get("Search candidates", {}).get("status") == "complete":
+        return 0.75
+    if stages_by_name.get("Search candidates"):
+        return 0.5
     if stages_by_name.get("Fetch surfaces", {}).get("status") == "complete":
         return 0.35
     fetch = stages_by_name.get("Fetch surfaces")
@@ -498,11 +547,19 @@ def _diagnostic_resolution(bbox: BBox, native_resolution_m: float) -> float:
     return max(native_resolution_m, capped_resolution)
 
 
+def _record_projector(record: RunRecord) -> Projector:
+    """The projector for either run type — forward's OriginEstimate or
+    reverse's LaunchCoverageResult both carry one."""
+    if record.run_type == "reverse":
+        return record.launch_result.projector
+    return record.estimate.projector
+
+
 def _fetch_canopy_diagnostic_layer(record: RunRecord, bounds: BBox) -> RasterGrid:
     source = str(record.metadata.get("canopySource", "eth"))
     native_res = _native_canopy_resolution_m(source)
     resolution = _diagnostic_resolution(bounds, native_res)
-    projector = record.estimate.projector
+    projector = _record_projector(record)
     target = RasterGrid.empty(bounds, resolution, projector.utm_crs, fill=np.nan)
 
     if source == "meta":
@@ -536,14 +593,15 @@ def _diagnostic_layer_payload(run_id: str, record: RunRecord, params: dict[str, 
     if not record.metadata.get("layers", {}).get("canopyHeight"):
         raise ValueError("canopy layer is not available for this run")
 
-    requested = _diagnostic_bbox_from_query(params, record.estimate.projector)
+    projector = _record_projector(record)
+    requested = _diagnostic_bbox_from_query(params, projector)
     bounds = _intersect_bbox(requested, record.stack.occluder.bounds)
     if bounds is None:
         raise ValueError("diagnostic bounds are outside the analysed area")
 
     grid = _fetch_canopy_diagnostic_layer(record, bounds)
     payload = _serialize_grid(
-        grid, record.estimate.projector, max_dim=MAX_DIAGNOSTIC_LAYER_DIM, precision=2
+        grid, projector, max_dim=MAX_DIAGNOSTIC_LAYER_DIM, precision=2
     )
     payload["source"] = record.metadata.get("canopySource", "eth")
     payload["nativeResolutionM"] = _native_canopy_resolution_m(payload["source"])
@@ -722,6 +780,183 @@ def _run_analysis_job(job: RunJob, payload: dict) -> None:
             job.completed_at = time.perf_counter()
 
 
+def _launch_payload(run_id: str, record: RunRecord) -> dict:
+    result = record.launch_result
+    zone = record.zone
+    lon, lat = result.best_lonlat()
+    return {
+        "runId": run_id,
+        "runType": "reverse",
+        "bestLaunchPoint": {
+            "lon": lon,
+            "lat": lat,
+            "score": result.best_score,
+            "minVisibility": result.best_min_visibility,
+            "fracCovered": result.best_frac_covered,
+        },
+        "zone": {
+            "centerLat": zone.center_lat,
+            "centerLon": zone.center_lon,
+            "radiusM": zone.radius_m,
+            "flightAltitudeM": zone.flight_altitude_m,
+        },
+        "coverage": _serialize_grid(result.coverage, result.projector),
+        "minVisibility": _serialize_grid(
+            result.min_visibility, result.projector, max_dim=MAX_SERIALIZED_LAYER_DIM
+        ),
+        "fracCovered": _serialize_grid(
+            result.frac_covered, result.projector, max_dim=MAX_SERIALIZED_LAYER_DIM
+        ),
+        "surfaceLayers": _surface_layers(record.stack, result.projector),
+        "metadata": record.metadata,
+    }
+
+
+def _run_reverse_analysis(payload: dict, job: RunJob | None = None) -> tuple[str, RunRecord]:
+    job = job or RunJob(run_id=uuid.uuid4().hex)
+    zone = _parse_target_zone_payload(payload)
+    config, layer_flags = _config_from_payload(payload)
+    search_cfg = _search_config_from_payload(payload)
+    started = time.perf_counter()
+    job.started_at = started
+
+    _mark_job_stage(job, "Prepare AOI", "running", "Preparing launch-search area")
+    projector, bbox = aoi_for_target_zone(zone, config.max_range_m)
+    aoi_details = _aoi_details(
+        bbox, search_cfg.surface_resolution_m,
+        description="Flight-zone disk padded by max range x 1.1",
+    )
+    settings = payload.get("settings", {}) if isinstance(payload, dict) else {}
+    override_size = bool(settings.get("override_cell_limit", False))
+    _enforce_analysis_size(aoi_details, override=override_size)
+    _mark_job_stage(
+        job,
+        "Prepare AOI",
+        "complete",
+        (
+            f"AOI {bbox.width / 1000:.1f} x {bbox.height / 1000:.1f} km "
+            f"at {search_cfg.surface_resolution_m:g} m"
+        ),
+        aoi_details,
+    )
+
+    _mark_job_stage(
+        job,
+        "Fetch surfaces",
+        "running",
+        "Fetching DSM, canopy, and building surfaces",
+        aoi_details,
+    )
+    surface_config = dataclasses.replace(config, coarse_resolution_m=search_cfg.surface_resolution_m)
+    stack = build_surface_stack(
+        sightings=[],
+        config=surface_config,
+        projector=projector,
+        bbox=bbox,
+        gate_canopy_with_footprint=False,
+        progress_callback=lambda name, status, message, details: _mark_job_stage(
+            job, name, status, message, details
+        ),
+        **layer_flags,
+    )
+    surface_details = {
+        **aoi_details,
+        "rows": stack.occluder.rows,
+        "cols": stack.occluder.cols,
+        "cells": int(stack.occluder.data.size),
+        "layers": {
+            "dsm": True,
+            "bareEarth": True,
+            "canopyHeight": stack.canopy_height is not None,
+            "buildingHeight": stack.building_height is not None,
+            "launchWeight": True,
+        },
+    }
+    _mark_job_stage(
+        job,
+        "Fetch surfaces",
+        "complete",
+        f"Surfaces ready: {stack.occluder.rows} x {stack.occluder.cols} cells",
+        surface_details,
+    )
+
+    _mark_job_stage(job, "Search candidates", "running", "Scanning coarse candidate grid")
+    result = find_launch_area(
+        zone,
+        config=config,
+        search=search_cfg,
+        occluder=stack.occluder,
+        ground=stack.ground,
+        projector=projector,
+        launch_weight=stack.launch_weight,
+        progress_callback=lambda name, status, message, details: _mark_job_stage(
+            job, name, status, message, details
+        ),
+    )
+
+    _mark_job_stage(
+        job,
+        "Serialize result",
+        "running",
+        "Preparing result metadata and exports",
+    )
+
+    metadata = {
+        "flightAltitudeM": zone.flight_altitude_m,
+        "zoneRadiusM": zone.radius_m,
+        "coverageThreshold": search_cfg.coverage_threshold,
+        "candidatesEvaluated": result.n_candidates_evaluated,
+        "candidatesPrefiltered": result.n_candidates_prefiltered,
+        "canopySource": config.canopy_source,
+        "canopyGroundFloorM": config.canopy.effective_ground_floor_m(config.canopy_source),
+        "analysisResolutionM": search_cfg.surface_resolution_m,
+        "maxRangeM": config.max_range_m,
+        "gpuMode": _gpu_mode(config.prefer_gpu),
+        "cacheDir": config.cache_dir,
+        "aoi": surface_details,
+        "layers": surface_details["layers"],
+        "stages": [],
+        "elapsedMs": int((time.perf_counter() - started) * 1000),
+    }
+    _mark_job_stage(
+        job,
+        "Serialize result",
+        "complete",
+        "Result metadata ready",
+    )
+    _mark_job_stage(
+        job,
+        "Export ready",
+        "complete",
+        "GeoTIFF and PNG preview are available",
+    )
+
+    record = RunRecord(
+        run_type="reverse", launch_result=result, zone=zone, stack=stack, metadata=metadata,
+    )
+    run_id = RUN_STORE.put(record, run_id=job.run_id)
+    with job.lock:
+        job.record = record
+        job.status = "complete"
+        job.message = "Analysis complete"
+        job.completed_at = time.perf_counter()
+    snapshot = _job_snapshot(job)
+    metadata["stages"] = snapshot["stages"]
+    metadata["elapsedMs"] = snapshot["elapsedMs"]
+    return run_id, record
+
+
+def _run_reverse_analysis_job(job: RunJob, payload: dict) -> None:
+    try:
+        _run_reverse_analysis(payload, job=job)
+    except Exception as exc:  # noqa: BLE001 - worker boundary
+        with job.lock:
+            job.status = "error"
+            job.message = str(exc)
+            job.error = str(exc)
+            job.completed_at = time.perf_counter()
+
+
 def _geotiff_bytes(grid: RasterGrid) -> bytes:
     rows, cols = grid.shape
     profile = {
@@ -761,6 +996,14 @@ class LaunchPointHandler(BaseHTTPRequestHandler):
                         "analysisResolutionM": DEFAULT_ANALYSIS_RESOLUTION_M,
                         "preferGpu": True,
                     },
+                    "reverseSettings": {
+                        "flightAltitudeM": 100.0,
+                        "radiusM": 300.0,
+                        "coverageThreshold": LaunchSearchConfig().coverage_threshold,
+                        "candidateCoarseStrideM": LaunchSearchConfig().candidate_coarse_stride_m,
+                        "candidateFineStrideM": LaunchSearchConfig().candidate_fine_stride_m,
+                        "surfaceResolutionM": LaunchSearchConfig().surface_resolution_m,
+                    },
                     "tileSources": {
                         "map": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
                         "terrain": (
@@ -794,7 +1037,10 @@ class LaunchPointHandler(BaseHTTPRequestHandler):
             if job.record is None:
                 _json_response(self, snapshot, status=HTTPStatus.ACCEPTED)
                 return
-            _json_response(self, _analysis_payload(run_id, job.record))
+            if job.record.run_type == "reverse":
+                _json_response(self, _launch_payload(run_id, job.record))
+            else:
+                _json_response(self, _analysis_payload(run_id, job.record))
             return
         if parsed.path == "/api/runs/diagnostic-layer":
             params = parse_qs(parsed.query)
@@ -817,12 +1063,18 @@ class LaunchPointHandler(BaseHTTPRequestHandler):
             if record is None:
                 _error_response(self, "unknown run_id", status=HTTPStatus.NOT_FOUND)
                 return
-            data = _geotiff_bytes(record.estimate.probability)
+            if record.run_type == "reverse":
+                grid = record.launch_result.coverage
+                export_name = "coverage"
+            else:
+                grid = record.estimate.probability
+                export_name = "probability"
+            data = _geotiff_bytes(grid)
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "image/tiff")
             self.send_header(
                 "Content-Disposition",
-                f'attachment; filename="launchpoint_probability_{run_id[:8]}.tif"',
+                f'attachment; filename="launchpoint_{export_name}_{run_id[:8]}.tif"',
             )
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
@@ -858,6 +1110,18 @@ class LaunchPointHandler(BaseHTTPRequestHandler):
                     args=(job, payload),
                     daemon=True,
                     name=f"launchpoint-run-{job.run_id[:8]}",
+                )
+                thread.start()
+                _json_response(self, _job_snapshot(job), status=HTTPStatus.ACCEPTED)
+                return
+            if parsed.path == "/api/runs/launch":
+                payload = _read_json(self)
+                job = RUN_STORE.create_job()
+                thread = threading.Thread(
+                    target=_run_reverse_analysis_job,
+                    args=(job, payload),
+                    daemon=True,
+                    name=f"launchpoint-launch-{job.run_id[:8]}",
                 )
                 thread.start()
                 _json_response(self, _job_snapshot(job), status=HTTPStatus.ACCEPTED)

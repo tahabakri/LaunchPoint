@@ -6,6 +6,16 @@ geometrically visible from that controller, then confirm the pipeline recovers
 the controller's region.
 """
 
-from launchpoint.synthetic.scenario import SyntheticScenario, make_default_scenario
+from launchpoint.synthetic.scenario import (
+    LaunchScenario,
+    SyntheticScenario,
+    make_default_scenario,
+    make_launch_scenario,
+)
 
-__all__ = ["SyntheticScenario", "make_default_scenario"]
+__all__ = [
+    "SyntheticScenario",
+    "make_default_scenario",
+    "LaunchScenario",
+    "make_launch_scenario",
+]

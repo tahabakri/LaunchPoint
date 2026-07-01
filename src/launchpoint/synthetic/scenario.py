@@ -16,6 +16,7 @@ import numpy as np
 from launchpoint.core.geo import BBox, Projector
 from launchpoint.core.grid import RasterGrid
 from launchpoint.core.sighting import Sighting
+from launchpoint.core.target_zone import TargetZone
 
 
 def _synthetic_surface(xx: np.ndarray, yy: np.ndarray, seed: int) -> np.ndarray:
@@ -189,5 +190,163 @@ def make_default_scenario(
         controller_xy=(ctrl_x, ctrl_y),
         sightings=sightings,
         projector=proj,
+        antenna_height_m=antenna_height_m,
+    )
+
+
+@dataclass
+class LaunchScenario:
+    """A fully-known test world for the reverse (launch-coverage) problem.
+
+    Reuses the same ridge terrain (``_synthetic_surface``) and brute-force LOS
+    oracle (``_los_clear``) as ``SyntheticScenario``. The ridge is a straight
+    "wall" whose height depends only on the ``xx + yy`` coordinate (it is the
+    same regardless of position along the ridge), so any straight path
+    crossing ``xx + yy == 0`` passes near the ridge crest, and any path that
+    stays on one side never does. The zone and ``good_launch_xy`` are planted
+    on the same side (never crossing the ridge); ``bad_launch_xy`` is planted
+    on the opposite side (its line of sight to the zone crosses the ridge).
+
+    Attributes
+    ----------
+    surface:
+        The DSM-equivalent occluding surface (RasterGrid, UTM, metres).
+    zone:
+        The planted flight zone.
+    projector:
+        WGS84 <-> scenario-UTM projector.
+    good_launch_xy:
+        True (easting, northing) of a candidate with clear LOS to the whole
+        zone (zone centre + perimeter samples).
+    bad_launch_xy:
+        True (easting, northing) of a candidate whose LOS to at least part of
+        the zone is blocked by the synthetic ridge.
+    antenna_height_m:
+        Operator antenna height used when generating LOS.
+    """
+
+    surface: RasterGrid
+    zone: TargetZone
+    projector: Projector
+    good_launch_xy: tuple[float, float]
+    bad_launch_xy: tuple[float, float]
+    antenna_height_m: float
+
+
+def make_launch_scenario(
+    center_lon: float = 8.55,
+    center_lat: float = 47.37,
+    extent_m: float = 6000.0,
+    resolution_m: float = 30.0,
+    zone_radius_m: float = 300.0,
+    flight_altitude_agl_m: float = 80.0,
+    antenna_height_m: float = 1.5,
+    seed: int = 11,
+) -> LaunchScenario:
+    """Build a reproducible synthetic launch-coverage scenario.
+
+    Plants a flight-zone circle on one side of the synthetic ridge, then
+    searches for a "good" candidate on the same side (verified via
+    ``_los_clear`` to the zone centre and several perimeter samples) and a
+    "bad" candidate on the opposite side (verified to be blocked to at least
+    one of those same targets).
+    """
+    proj = Projector.for_point(center_lon, center_lat)
+    cx, cy = proj.to_utm(center_lon, center_lat)
+
+    half = extent_m / 2.0
+    bbox = BBox(cx - half, cy - half, cx + half, cy + half)
+    grid = RasterGrid.empty(bbox, resolution_m, proj.utm_crs, fill=0.0, dtype=np.float64)
+
+    rows, cols = grid.shape
+    jj, ii = np.meshgrid(np.arange(cols), np.arange(rows))
+    wx, wy = grid.transform * (jj + 0.5, ii + 0.5)
+    lx = np.asarray(wx) - cx
+    ly = np.asarray(wy) - cy
+    grid.data = _synthetic_surface(lx, ly, seed)
+
+    # Zone centred well off to one side of the NE-SW ridge (xx + yy = 0 is the
+    # ridge crest line), so it sits in open terrain.
+    zone_offset = extent_m * 0.22
+    zone_x = cx + zone_offset
+    zone_y = cy + zone_offset
+    zr, zc = grid.world_to_pixel(zone_x, zone_y)
+    zone_ground = float(grid.data[zr, zc])
+    zone_lon, zone_lat = proj.to_lonlat(zone_x, zone_y)
+    zone = TargetZone(
+        center_lat=float(zone_lat),
+        center_lon=float(zone_lon),
+        radius_m=zone_radius_m,
+        flight_altitude_m=flight_altitude_agl_m,
+    )
+
+    # LOS check targets: the zone centre plus eight perimeter samples, all at
+    # the flight altitude — a candidate must see *all* of these to count as
+    # "good," mirroring the strict min-visibility scoring rule under test.
+    n_perimeter = 8
+    targets: list[tuple[int, int, float]] = [(zr, zc, zone_ground + flight_altitude_agl_m)]
+    for angle in np.linspace(0.0, 2 * np.pi, n_perimeter, endpoint=False):
+        px = zone_x + zone_radius_m * np.cos(angle)
+        py = zone_y + zone_radius_m * np.sin(angle)
+        pr, pc = grid.world_to_pixel(px, py)
+        pr = int(np.clip(pr, 0, rows - 1))
+        pc = int(np.clip(pc, 0, cols - 1))
+        pz = float(grid.data[pr, pc]) + flight_altitude_agl_m
+        targets.append((pr, pc, pz))
+
+    def _sees_all(cand_r: int, cand_c: int, cand_eye: float) -> bool:
+        return all(
+            _los_clear(grid.data, resolution_m, cand_r, cand_c, cand_eye, tr, tc, tz)
+            for tr, tc, tz in targets
+        )
+
+    def _blocked_to_any(cand_r: int, cand_c: int, cand_eye: float) -> bool:
+        return any(
+            not _los_clear(grid.data, resolution_m, cand_r, cand_c, cand_eye, tr, tc, tz)
+            for tr, tc, tz in targets
+        )
+
+    rng = np.random.default_rng(seed + 200)
+
+    good_xy: tuple[float, float] | None = None
+    attempts = 0
+    while good_xy is None and attempts < 5000:
+        attempts += 1
+        gx = cx + rng.uniform(zone_offset * 0.3, zone_offset * 1.6)
+        gy = cy + rng.uniform(zone_offset * 0.3, zone_offset * 1.6)
+        gr, gc = grid.world_to_pixel(gx, gy)
+        if not grid.contains_pixel(gr, gc):
+            continue
+        if np.hypot(gx - zone_x, gy - zone_y) < zone_radius_m * 1.5:
+            continue  # keep the candidate outside the zone itself
+        g_eye = float(grid.data[gr, gc]) + antenna_height_m
+        if _sees_all(gr, gc, g_eye):
+            good_xy = (gx, gy)
+
+    if good_xy is None:
+        raise RuntimeError("could not find a good launch candidate; loosen constraints")
+
+    bad_xy: tuple[float, float] | None = None
+    attempts = 0
+    while bad_xy is None and attempts < 5000:
+        attempts += 1
+        bx = cx - rng.uniform(zone_offset * 0.3, zone_offset * 1.6)
+        by = cy - rng.uniform(zone_offset * 0.3, zone_offset * 1.6)
+        br, bc = grid.world_to_pixel(bx, by)
+        if not grid.contains_pixel(br, bc):
+            continue
+        b_eye = float(grid.data[br, bc]) + antenna_height_m
+        if _blocked_to_any(br, bc, b_eye):
+            bad_xy = (bx, by)
+
+    if bad_xy is None:
+        raise RuntimeError("could not find a ridge-occluded bad launch candidate; loosen constraints")
+
+    return LaunchScenario(
+        surface=grid,
+        zone=zone,
+        projector=proj,
+        good_launch_xy=good_xy,
+        bad_launch_xy=bad_xy,
         antenna_height_m=antenna_height_m,
     )

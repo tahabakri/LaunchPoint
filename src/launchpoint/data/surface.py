@@ -130,6 +130,7 @@ def build_surface_stack(
     config: Config,
     projector: Projector | None = None,
     *,
+    bbox: BBox | None = None,
     use_canopy: bool = True,
     use_buildings: bool = True,
     use_cache: bool = True,
@@ -140,8 +141,16 @@ def build_surface_stack(
 
     Requires network on first call (Copernicus DSM is mandatory; canopy/buildings
     are best-effort). Subsequent calls over the same AOI read from the cache.
+
+    ``bbox`` lets a caller supply the AOI directly (e.g. a target-zone-derived
+    bbox from ``aoi_for_target_zone``) instead of having one derived from
+    ``sightings`` — when given, ``projector`` is required and the internal
+    ``aoi_for_sightings`` call is skipped entirely.
     """
-    if projector is None:
+    if bbox is not None:
+        if projector is None:
+            raise ValueError("projector is required when bbox is supplied")
+    elif projector is None:
         projector, bbox = aoi_for_sightings(sightings, config.max_range_m)
     else:
         _, bbox = aoi_for_sightings(sightings, config.max_range_m)

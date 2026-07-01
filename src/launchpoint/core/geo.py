@@ -103,3 +103,23 @@ def aoi_for_sightings(
 
     pad = max_range_m * range_buffer_frac
     return proj, BBox(min(xs), min(ys), max(xs), max(ys)).buffered(pad)
+
+
+def aoi_for_target_zone(
+    zone, max_range_m: float, range_buffer_frac: float = 1.1
+) -> tuple[Projector, BBox]:
+    """Compute the area of interest in local UTM for a launch-coverage search.
+
+    The AOI is the flight-zone disk padded by the maximum control range (plus
+    the same margin ``aoi_for_sightings`` uses), because a candidate launch
+    point up to ``max_range_m`` beyond the zone's edge could still reach it.
+    The local UTM zone is chosen from the zone's centre.
+
+    Returns the ``Projector`` and the AOI ``BBox`` (in UTM metres) — the same
+    shape as ``aoi_for_sightings`` so downstream consumers (``build_surface_stack``,
+    ``SurfaceProvider``) are agnostic to which one built it.
+    """
+    proj = Projector.for_point(zone.center_lon, zone.center_lat)
+    cx, cy = proj.to_utm(zone.center_lon, zone.center_lat)
+    pad = zone.radius_m + max_range_m * range_buffer_frac
+    return proj, BBox(cx - pad, cy - pad, cx + pad, cy + pad)

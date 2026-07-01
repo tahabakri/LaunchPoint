@@ -107,7 +107,7 @@ export function rasterToCanvas(raster, options = {}) {
     const px = i * 4;
     let rgba = [0, 0, 0, 0];
     if (value !== null && Number.isFinite(value)) {
-      if (kind === "probability" || kind === "contribution") {
+      if (kind === "probability" || kind === "contribution" || kind === "coverage") {
         rgba = heatColor(value, opacity);
       } else if (kind === "credible") {
         const isInside = value >= 0.5;

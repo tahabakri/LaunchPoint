@@ -3,16 +3,24 @@ from __future__ import annotations
 import numpy as np
 from rasterio.io import MemoryFile
 
+from launchpoint.config import Config, MonteCarloConfig
 from launchpoint.core.geo import BBox, Projector
 from launchpoint.core.grid import RasterGrid
+from launchpoint.reverse.pipeline import find_launch_area
+from launchpoint.reverse.search import LaunchSearchConfig
+from launchpoint.synthetic import make_launch_scenario
 from launchpoint.ui.server import (
     RunJob,
+    RunRecord,
     _config_from_payload,
     _geotiff_bytes,
     _job_snapshot,
+    _launch_payload,
     _mark_job_stage,
     _parse_csv_sightings,
     _parse_sightings_payload,
+    _parse_target_zone_payload,
+    _search_config_from_payload,
     _serialize_grid,
 )
 
@@ -110,3 +118,59 @@ def test_job_progress_snapshot_tracks_stage_details():
     assert snapshot["stages"][0]["name"] == "Run fusion"
     assert snapshot["stages"][0]["details"]["total"] == 2
     assert 0.0 < snapshot["percent"] < 1.0
+
+
+def test_parse_target_zone_payload_accepts_schema():
+    zone = _parse_target_zone_payload(
+        {
+            "zone": {
+                "label": "field survey",
+                "center_lat": 47.372,
+                "center_lon": 8.542,
+                "radius_m": 400.0,
+                "flight_altitude_m": 100.0,
+            }
+        }
+    )
+    assert zone.label == "field survey"
+    assert zone.radius_m == 400.0
+    assert zone.flight_altitude_m == 100.0
+
+
+def test_search_config_from_payload_uses_defaults_and_overrides():
+    default_cfg = _search_config_from_payload({"settings": {}})
+    assert default_cfg.coverage_threshold == LaunchSearchConfig().coverage_threshold
+
+    overridden = _search_config_from_payload(
+        {"settings": {"coverage_threshold": 0.7, "candidate_coarse_stride_m": 25.0}}
+    )
+    assert overridden.coverage_threshold == 0.7
+    assert overridden.candidate_coarse_stride_m == 25.0
+
+
+def test_launch_payload_serializes_result():
+    sc = make_launch_scenario(seed=11)
+    config = Config(monte_carlo=MonteCarloConfig(samples_per_sighting=1, seed=1))
+    search = LaunchSearchConfig(
+        candidate_coarse_stride_m=150.0, candidate_fine_stride_m=50.0, surface_resolution_m=30.0,
+    )
+    result = find_launch_area(
+        sc.zone, config=config, search=search,
+        occluder=sc.surface, projector=sc.projector,
+    )
+
+    from launchpoint.data.surface import SurfaceStack
+
+    record = RunRecord(
+        run_type="reverse",
+        launch_result=result,
+        zone=sc.zone,
+        stack=SurfaceStack(occluder=sc.surface, ground=sc.surface, launch_weight=sc.surface.like(fill=1.0)),
+        metadata={"canopySource": "eth"},
+    )
+    payload = _launch_payload("run-1", record)
+
+    assert payload["runType"] == "reverse"
+    assert payload["zone"]["radiusM"] == sc.zone.radius_m
+    assert "lon" in payload["bestLaunchPoint"] and "lat" in payload["bestLaunchPoint"]
+    assert payload["coverage"]["rows"] > 0
