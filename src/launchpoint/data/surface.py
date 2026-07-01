@@ -145,6 +145,32 @@ def build_surface_stack(
         projector, bbox = aoi_for_sightings(sightings, config.max_range_m)
     else:
         _, bbox = aoi_for_sightings(sightings, config.max_range_m)
+    return build_surface_stack_for_bbox(
+        sightings,
+        config,
+        projector,
+        bbox,
+        use_canopy=use_canopy,
+        use_buildings=use_buildings,
+        use_cache=use_cache,
+        gate_canopy_with_footprint=gate_canopy_with_footprint,
+        progress_callback=progress_callback,
+    )
+
+
+def build_surface_stack_for_bbox(
+    sightings: list[Sighting],
+    config: Config,
+    projector: Projector,
+    bbox: BBox,
+    *,
+    use_canopy: bool = True,
+    use_buildings: bool = True,
+    use_cache: bool = True,
+    gate_canopy_with_footprint: bool = True,
+    progress_callback: StageCallback | None = None,
+) -> SurfaceStack:
+    """Fetch/derive surfaces for an explicit metric AOI."""
 
     epsg = projector.utm_crs.to_epsg()
     res = config.coarse_resolution_m
@@ -199,7 +225,7 @@ def build_surface_stack(
     if use_canopy:
         try:
             footprint = None
-            if gate_canopy_with_footprint:
+            if gate_canopy_with_footprint and sightings:
                 from launchpoint.fusion.montecarlo import reachable_footprint
 
                 sigmas = [s.position_sigma_m for s in sightings]

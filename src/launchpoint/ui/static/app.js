@@ -1,7 +1,9 @@
 import {
   drawMostLikely,
   drawOsmBasemap,
+  drawFlightArea,
   drawRasterInView,
+  drawRecommendedLaunch,
   drawSightings,
   formatArea,
   formatCoord,
@@ -20,17 +22,21 @@ const DEFAULT_STAGES = ["Prepare AOI", "Fetch surfaces", "Run fusion", "Serializ
 const state = {
   map: null,
   terrain: null,
+  mode: "origin",
   sightings: [],
+  flightArea: null,
   selectedSighting: null,
   selectedCell: null,
   inspectorLocked: false,
   addingPin: false,
+  drawingFlightArea: false,
   analysis: null,
   overlays: {
     heatmap: null,
     credible: null,
     diagnostic: null,
     markers: null,
+    flightArea: null,
     rays: null,
   },
   diagnosticRequestId: 0,
@@ -66,6 +72,13 @@ function init() {
 function cacheElements() {
   [
     "addPinButton",
+    "sightingsPanel",
+    "coveragePanel",
+    "drawFlightAreaButton",
+    "flightAreaState",
+    "flightRadiusInput",
+    "missionAltitudeInput",
+    "coverageSampleInput",
     "importButton",
     "clearButton",
     "fileInput",
@@ -91,6 +104,8 @@ function cacheElements() {
     "rayModeSelect",
     "mostLikelyValue",
     "credibleAreaValue",
+    "primaryMetricLabel",
+    "secondaryMetricLabel",
     "runStateBadge",
     "limitationsNote",
     "exportTiffButton",
@@ -149,12 +164,37 @@ function initTerrain() {
 }
 
 function bindEvents() {
+  document.querySelectorAll(".mode-segment").forEach((button) => {
+    button.addEventListener("click", () => switchMode(button.dataset.mode));
+  });
   el.addPinButton.addEventListener("click", () => {
     state.addingPin = !state.addingPin;
     el.addPinButton.classList.toggle("active", state.addingPin);
     el.runMessage.textContent = state.addingPin
       ? "Click the map to place a sighting."
       : statusText();
+  });
+  el.drawFlightAreaButton.addEventListener("click", () => {
+    state.drawingFlightArea = !state.drawingFlightArea;
+    el.drawFlightAreaButton.classList.toggle("active", state.drawingFlightArea);
+    el.runMessage.textContent = state.drawingFlightArea
+      ? "Click the map to place the flight area."
+      : statusText();
+  });
+  el.flightRadiusInput.addEventListener("input", () => {
+    if (state.flightArea) {
+      state.flightArea.radiusM = Math.max(1, Number(el.flightRadiusInput.value) || 1);
+      renderFlightArea();
+      updateRunReadiness();
+      syncTerrainState();
+    }
+  });
+  el.missionAltitudeInput.addEventListener("input", () => {
+    if (state.flightArea) {
+      state.flightArea.altitudeAglM = Math.max(0, Number(el.missionAltitudeInput.value) || 0);
+      updateFlightAreaControls();
+      updateRunReadiness();
+    }
   });
   el.importButton.addEventListener("click", () => el.fileInput.click());
   el.fileInput.addEventListener("change", handleImport);
@@ -257,6 +297,16 @@ async function fetchDefaults() {
 }
 
 function handleMapClick(event) {
+  if (state.mode === "coverage" && state.drawingFlightArea) {
+    setFlightArea({
+      center: { lat: event.latlng.lat, lon: event.latlng.lng },
+      radiusM: Math.max(100, Number(el.flightRadiusInput.value) || 1200),
+      altitudeAglM: Math.max(0, Number(el.missionAltitudeInput.value) || 100),
+    });
+    state.drawingFlightArea = false;
+    el.drawFlightAreaButton.classList.remove("active");
+    return;
+  }
   if (state.addingPin) {
     addSighting({
       label: `S${state.sightings.length + 1}`,
@@ -395,12 +445,141 @@ function selectSighting(index) {
   syncTerrainState();
 }
 
+function switchMode(mode) {
+  state.mode = mode === "coverage" ? "coverage" : "origin";
+  state.addingPin = false;
+  state.drawingFlightArea = false;
+  document.querySelectorAll(".mode-segment").forEach((button) => {
+    button.classList.toggle("active", button.dataset.mode === state.mode);
+  });
+  el.sightingsPanel.hidden = state.mode !== "origin";
+  el.coveragePanel.hidden = state.mode !== "coverage";
+  el.addPinButton.classList.remove("active");
+  el.drawFlightAreaButton.classList.remove("active");
+  state.analysis = null;
+  clearRasterOverlays();
+  renderMarkers();
+  renderFlightArea();
+  renderRays();
+  resetResults();
+  updateRunReadiness();
+  syncTerrainState();
+}
+
+function setFlightArea(area) {
+  state.flightArea = {
+    center: {
+      lat: Number(area.center.lat),
+      lon: Number(area.center.lon ?? area.center.lng),
+    },
+    radiusM: Number(area.radiusM ?? area.radius_m ?? 1200),
+    altitudeAglM: Number(area.altitudeAglM ?? area.altitude_agl_m ?? 100),
+  };
+  updateFlightAreaControls();
+  renderFlightArea();
+  updateRunReadiness();
+  syncTerrainState();
+}
+
+function updateFlightAreaControls() {
+  if (!state.flightArea) {
+    el.flightAreaState.textContent = "Unset";
+    el.flightAreaState.classList.add("muted");
+    return;
+  }
+  el.flightAreaState.textContent = "Ready";
+  el.flightAreaState.classList.remove("muted");
+  el.flightRadiusInput.value = String(Math.round(state.flightArea.radiusM));
+  el.missionAltitudeInput.value = String(Math.round(state.flightArea.altitudeAglM));
+}
+
+function renderFlightArea() {
+  if (state.overlays.flightArea) {
+    state.map.removeLayer(state.overlays.flightArea);
+    state.overlays.flightArea = null;
+  }
+  updateFlightAreaControls();
+  if (state.mode !== "coverage" || !state.flightArea) return;
+
+  const area = state.flightArea;
+  const group = L.layerGroup();
+  L.circle([area.center.lat, area.center.lon], {
+    radius: area.radiusM,
+    color: "#55d6c2",
+    weight: 2,
+    opacity: 0.9,
+    fillColor: "#55d6c2",
+    fillOpacity: 0.08,
+    dashArray: "8 6",
+  }).addTo(group);
+
+  const center = L.marker([area.center.lat, area.center.lon], {
+    draggable: true,
+    icon: L.divIcon({
+      className: "",
+      html: `<div class="map-marker selected">A</div>`,
+      iconSize: [28, 28],
+      iconAnchor: [14, 14],
+    }),
+  });
+  center.on("dragend", (event) => {
+    const latlng = event.target.getLatLng();
+    area.center = { lat: latlng.lat, lon: latlng.lng };
+    renderFlightArea();
+    updateRunReadiness();
+    syncTerrainState();
+  });
+  center.addTo(group);
+
+  const handle = radiusHandleLatLng(area);
+  const radiusMarker = L.marker([handle.lat, handle.lon], {
+    draggable: true,
+    icon: L.divIcon({
+      className: "",
+      html: `<div class="map-marker radius-handle"></div>`,
+      iconSize: [18, 18],
+      iconAnchor: [9, 9],
+    }),
+  });
+  radiusMarker.on("dragend", (event) => {
+    const latlng = event.target.getLatLng();
+    area.radiusM = Math.max(50, distanceMeters(area.center, { lat: latlng.lat, lon: latlng.lng }));
+    renderFlightArea();
+    updateRunReadiness();
+    syncTerrainState();
+  });
+  radiusMarker.addTo(group);
+
+  if (state.analysis?.kind === "coverage" && state.analysis.recommendedLaunch) {
+    const rec = state.analysis.recommendedLaunch;
+    L.marker([rec.lat, rec.lon], {
+      icon: L.divIcon({
+        className: "",
+        html: `<div class="launch-marker"></div>`,
+        iconSize: [30, 30],
+        iconAnchor: [15, 15],
+      }),
+    }).addTo(group);
+  }
+
+  group.addTo(state.map);
+  state.overlays.flightArea = group;
+}
+
+function radiusHandleLatLng(area) {
+  const metersPerDegLon = 111320 * Math.cos((area.center.lat * Math.PI) / 180);
+  return {
+    lat: area.center.lat,
+    lon: area.center.lon + area.radiusM / Math.max(metersPerDegLon, 1),
+  };
+}
+
 function renderMarkers() {
   if (state.overlays.markers) {
     state.map.removeLayer(state.overlays.markers);
     state.overlays.markers = null;
   }
-  if (!state.layers.sightings) return;
+  if (state.mode !== "origin" || !state.layers.sightings) return;
 
   const group = L.layerGroup();
   state.sightings.forEach((sighting, index) => {
@@ -545,7 +724,9 @@ async function updateRasterOverlays() {
   const requestId = state.diagnosticRequestId;
 
   const contributionIndex = el.contributionSelect.value;
-  const baseRaster = contributionIndex === ""
+  const baseRaster = analysis.kind === "coverage"
+    ? analysis.coverage
+    : contributionIndex === ""
     ? analysis.probability
     : analysis.perSighting[Number(contributionIndex)]?.raster;
 
@@ -565,8 +746,9 @@ async function updateRasterOverlays() {
     ).addTo(state.map);
   }
 
-  if (state.layers.credible && analysis.credibleRegion?.mask) {
-    const mask = analysis.credibleRegion.mask;
+  const areaMask = analysis.kind === "coverage" ? analysis.flightMask : analysis.credibleRegion?.mask;
+  if (state.layers.credible && areaMask) {
+    const mask = areaMask;
     state.overlays.credible = L.imageOverlay(
       rasterToDataUrl(mask, { kind: "credible", opacity: 1 }),
       leafletBounds(mask),
@@ -664,6 +846,10 @@ async function handleImport(event) {
 }
 
 async function runAnalysis() {
+  if (state.mode === "coverage") {
+    await runCoverageAnalysis();
+    return;
+  }
   if (!validSightings()) return;
   state.inspectorLocked = false;
   setRunState("Running", "Starting analysis...");
@@ -733,6 +919,84 @@ async function waitForRunResult(runId) {
   }
 }
 
+async function runCoverageAnalysis() {
+  if (!validFlightArea()) return;
+  state.inspectorLocked = false;
+  setRunState("Running", "Starting coverage planner...");
+  setTimelineRunning();
+  setProgressVisible(true);
+  setProgressValue(0);
+  el.runButton.disabled = true;
+  let hadError = false;
+
+  try {
+    const startResponse = await fetch("/api/coverage-runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        flightArea: state.flightArea,
+        settings: readSettings(),
+      }),
+    });
+    const startPayload = await startResponse.json();
+    if (!startResponse.ok) {
+      const message = startPayload.error || "Coverage analysis failed";
+      if (startResponse.status === 404 && message === "unknown endpoint") {
+        throw new Error(
+          "Coverage planner endpoint is not active. Restart the LaunchPoint server and reload the page."
+        );
+      }
+      throw new Error(message);
+    }
+
+    const runId = startPayload.runId;
+    updateRunProgress(startPayload);
+    const payload = await waitForCoverageResult(runId);
+
+    state.analysis = payload;
+    state.selectedCell = payload.recommendedLaunch;
+    setRunState("Complete", `Completed in ${Math.round(payload.metadata.elapsedMs / 1000)}s.`);
+    setProgressValue(1);
+    updateTimeline(payload.metadata.stages);
+    updateResults();
+    updateContributionOptions();
+    updateRasterOverlays();
+    renderMarkers();
+    renderFlightArea();
+    el.exportTiffButton.disabled = false;
+    el.exportPngButton.disabled = false;
+    state.map.fitBounds(leafletBounds(payload.coverage), { padding: [36, 36] });
+    syncTerrainState();
+  } catch (error) {
+    hadError = true;
+    setRunState("Error", error.message);
+    markTimelineError();
+  } finally {
+    el.runButton.disabled = false;
+    if (!hadError) updateRunReadiness();
+  }
+}
+
+async function waitForCoverageResult(runId) {
+  while (true) {
+    await wait(1200);
+    const statusResponse = await fetch(`/api/coverage-runs/status?run_id=${encodeURIComponent(runId)}`);
+    const statusPayload = await statusResponse.json();
+    if (!statusResponse.ok) throw new Error(statusPayload.error || "Could not read coverage status");
+    updateRunProgress(statusPayload);
+
+    if (statusPayload.status === "error") {
+      throw new Error(statusPayload.error || statusPayload.message || "Coverage analysis failed");
+    }
+    if (statusPayload.ready || statusPayload.status === "complete") {
+      const resultResponse = await fetch(`/api/coverage-runs/result?run_id=${encodeURIComponent(runId)}`);
+      const resultPayload = await resultResponse.json();
+      if (!resultResponse.ok) throw new Error(resultPayload.error || "Could not load coverage result");
+      return resultPayload;
+    }
+  }
+}
+
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -756,19 +1020,28 @@ function readSettings() {
     use_buildings: el.buildingsInput.checked,
     use_cache: el.cacheInput.checked,
     override_cell_limit: el.overrideSizeInput.checked,
+    coverage_sample_count: Number(el.coverageSampleInput?.value || 49),
   };
 }
 
 function updateResults() {
   const analysis = state.analysis;
   if (!analysis) return;
-  el.mostLikelyValue.textContent = `${formatCoord(analysis.mostLikely.lat)}, ${formatCoord(analysis.mostLikely.lon)}`;
-  el.credibleAreaValue.textContent = formatArea(analysis.credibleRegion.areaKm2);
+  const isCoverage = analysis.kind === "coverage";
+  const primaryPoint = isCoverage ? analysis.recommendedLaunch : analysis.mostLikely;
+  el.primaryMetricLabel.textContent = isCoverage ? "Best launch" : "Most likely";
+  el.secondaryMetricLabel.textContent = isCoverage ? "Best coverage" : "50% area";
+  el.mostLikelyValue.textContent = `${formatCoord(primaryPoint.lat)}, ${formatCoord(primaryPoint.lon)}`;
+  el.credibleAreaValue.textContent = isCoverage
+    ? formatProbability(analysis.metadata.bestCoverage)
+    : formatArea(analysis.credibleRegion.areaKm2);
   const layers = analysis.metadata.layers || {};
   const aoi = analysis.metadata.aoi || {};
   el.metadataList.innerHTML = `
-    ${metadataRow("Samples", analysis.metadata.samples)}
+    ${metadataRow("Samples", isCoverage ? analysis.metadata.sampleCount : analysis.metadata.samples)}
     ${metadataRow("Max range", formatMeters(analysis.metadata.maxRangeM))}
+    ${isCoverage ? metadataRow("Mission altitude", formatMeters(analysis.metadata.missionAltitudeAglM)) : ""}
+    ${isCoverage ? metadataRow("Flight radius", formatMeters(analysis.metadata.flightRadiusM)) : ""}
     ${metadataRow("Mode", analysis.metadata.gpuMode)}
     ${metadataRow("AOI", aoi.widthM ? `${formatMeters(aoi.widthM)} x ${formatMeters(aoi.heightM)}` : "-")}
     ${metadataRow("Grid cells", aoi.cells ? `${aoi.cells.toLocaleString()} @ ${formatMeters(aoi.resolutionM)}` : "-")}
@@ -777,7 +1050,7 @@ function updateResults() {
     ${metadataRow("Buildings", layers.buildingHeight ? "loaded" : "not available")}
     ${metadataRow("Cache", analysis.metadata.cacheDir)}
   `;
-  updateInspector({ lat: analysis.mostLikely.lat, lng: analysis.mostLikely.lon });
+  updateInspector({ lat: primaryPoint.lat, lng: primaryPoint.lon });
 }
 
 function metadataRow(label, value) {
@@ -786,6 +1059,11 @@ function metadataRow(label, value) {
 
 function updateContributionOptions() {
   el.contributionSelect.innerHTML = `<option value="">All sightings</option>`;
+  if (state.analysis?.kind === "coverage") {
+    el.contributionSelect.disabled = true;
+    return;
+  }
+  el.contributionSelect.disabled = false;
   (state.analysis?.perSighting || []).forEach((item, index) => {
     const option = document.createElement("option");
     option.value = String(index);
@@ -799,25 +1077,28 @@ function updateInspector(latlng) {
   if (!analysis) return;
   const lat = latlng.lat;
   const lon = latlng.lng ?? latlng.lon;
-  const prob = rasterValueAt(analysis.probability, lat, lon);
+  const isCoverage = analysis.kind === "coverage";
+  const prob = rasterValueAt(isCoverage ? analysis.coverage : analysis.probability, lat, lon);
   const dsm = rasterValueAt(analysis.surfaceLayers.dsm, lat, lon);
   const bare = rasterValueAt(analysis.surfaceLayers.bareEarth, lat, lon);
   const canopy = rasterValueAt(analysis.surfaceLayers.canopyHeight, lat, lon);
   const building = rasterValueAt(analysis.surfaceLayers.buildingHeight, lat, lon);
   const launch = rasterValueAt(analysis.surfaceLayers.launchWeight, lat, lon);
-  const selectedContribution = state.selectedSighting === null
+  const selectedContribution = isCoverage || state.selectedSighting === null
     ? null
     : rasterValueAt(analysis.perSighting[state.selectedSighting]?.raster, lat, lon);
-  const range = state.selectedSighting === null
+  const range = isCoverage
+    ? distanceMeters(analysis.flightArea.center, { lat, lon })
+    : state.selectedSighting === null
     ? null
     : distanceMeters(state.sightings[state.selectedSighting], { lat, lon });
   const pathState = pathLabel(selectedContribution);
 
   el.inspectorBody.innerHTML = `
     ${inspectorRow("Lat/Lon", `${formatCoord(lat)}, ${formatCoord(lon)}`)}
-    ${inspectorRow("Probability", formatProbability(prob))}
-    ${inspectorRow("Selected path", pathState)}
-    ${inspectorRow("Range", formatMeters(range))}
+    ${inspectorRow(isCoverage ? "Coverage score" : "Probability", formatProbability(prob))}
+    ${isCoverage ? "" : inspectorRow("Selected path", pathState)}
+    ${inspectorRow(isCoverage ? "From area center" : "Range", formatMeters(range))}
     ${inspectorRow("DSM", formatMeters(dsm))}
     ${inspectorRow("Bare earth", formatMeters(bare))}
     ${inspectorRow("Canopy", formatMeters(canopy))}
@@ -854,17 +1135,22 @@ function setProgressValue(value) {
 }
 
 function setTimelineRunning() {
-  ensureTimelineRows(DEFAULT_STAGES);
+  const stages = state.mode === "coverage"
+    ? ["Prepare AOI", "Fetch surfaces", "Run coverage", "Serialize result", "Export ready"]
+    : DEFAULT_STAGES;
+  ensureTimelineRows(stages);
   Array.from(el.timeline.children).forEach((item, index) => {
     item.className = index === 0 ? "running" : "pending";
-    item.querySelector("span").textContent = DEFAULT_STAGES[index] || "Stage";
+    item.querySelector("span").textContent = stages[index] || "Stage";
     item.querySelector("time").textContent = "-";
     item.title = "";
   });
 }
 
 function updateTimeline(stages) {
-  const names = [...DEFAULT_STAGES];
+  const names = state.mode === "coverage"
+    ? ["Prepare AOI", "Fetch surfaces", "Run coverage", "Serialize result", "Export ready"]
+    : [...DEFAULT_STAGES];
   stages.forEach((stage) => {
     if (!names.includes(stage.name)) names.push(stage.name);
   });
@@ -908,6 +1194,8 @@ function markTimelineError() {
 }
 
 function resetResults() {
+  el.primaryMetricLabel.textContent = state.mode === "coverage" ? "Best launch" : "Most likely";
+  el.secondaryMetricLabel.textContent = state.mode === "coverage" ? "Best coverage" : "50% area";
   el.mostLikelyValue.textContent = "-";
   el.credibleAreaValue.textContent = "-";
   el.runStateBadge.textContent = "Idle";
@@ -922,6 +1210,17 @@ function resetResults() {
 }
 
 function updateRunReadiness() {
+  if (state.mode === "coverage") {
+    el.runButton.disabled = !validFlightArea();
+    if (!state.flightArea) {
+      el.runMessage.textContent = "Draw a flight area to plan launch coverage.";
+    } else if (!validFlightArea()) {
+      el.runMessage.textContent = "Check flight area radius and mission altitude.";
+    } else if (!state.analysis) {
+      el.runMessage.textContent = statusText();
+    }
+    return;
+  }
   el.runButton.disabled = !validSightings();
   if (!state.sightings.length) {
     el.runMessage.textContent = "Add a sighting or import a file.";
@@ -933,6 +1232,11 @@ function updateRunReadiness() {
 }
 
 function statusText() {
+  if (state.mode === "coverage") {
+    return state.flightArea
+      ? `Flight area ready: ${formatMeters(state.flightArea.radiusM)} radius.`
+      : "Draw a flight area to plan launch coverage.";
+  }
   return `${state.sightings.length} sighting${state.sightings.length === 1 ? "" : "s"} ready.`;
 }
 
@@ -945,6 +1249,19 @@ function fitSightings() {
 
 function validSightings() {
   return state.sightings.length > 0 && state.sightings.every(isFiniteSighting);
+}
+
+function validFlightArea() {
+  const area = state.flightArea;
+  return Boolean(
+    area
+      && Number.isFinite(area.center?.lat)
+      && Number.isFinite(area.center?.lon)
+      && Number.isFinite(area.radiusM)
+      && area.radiusM > 0
+      && Number.isFinite(area.altitudeAglM)
+      && area.altitudeAglM >= 0
+  );
 }
 
 function isFiniteSighting(sighting) {
@@ -984,7 +1301,8 @@ function loadTerrainForCurrentView() {
     analysis: state.analysis,
     sightings: state.sightings,
     selectedSighting: state.selectedSighting,
-    selectedCell: state.selectedCell || state.analysis?.mostLikely || null,
+    selectedCell: state.selectedCell || state.analysis?.recommendedLaunch || state.analysis?.mostLikely || null,
+    flightArea: state.analysis?.flightArea || state.flightArea,
     rayMode: el.rayModeSelect.value,
     maxRangeM: Number(el.maxRangeInput.value),
     showProbability: state.layers.probability,
@@ -1000,7 +1318,8 @@ function syncTerrainState() {
     analysis: state.analysis,
     sightings: state.sightings,
     selectedSighting: state.selectedSighting,
-    selectedCell: state.selectedCell || state.analysis?.mostLikely || null,
+    selectedCell: state.selectedCell || state.analysis?.recommendedLaunch || state.analysis?.mostLikely || null,
+    flightArea: state.analysis?.flightArea || state.flightArea,
     rayMode: el.rayModeSelect.value,
     maxRangeM: Number(el.maxRangeInput.value),
     showProbability: state.layers.probability,
@@ -1041,17 +1360,21 @@ async function exportPngPreview() {
 async function drawVisiblePreviewLayers(ctx, viewBounds, zoom, canvas) {
   const analysis = state.analysis;
   const contributionIndex = el.contributionSelect.value;
-  const baseRaster = contributionIndex === ""
+  const isCoverage = analysis.kind === "coverage";
+  const baseRaster = isCoverage
+    ? analysis.coverage
+    : contributionIndex === ""
     ? analysis.probability
     : analysis.perSighting[Number(contributionIndex)]?.raster;
   if (state.layers.probability && baseRaster) {
     drawRasterInView(ctx, baseRaster, viewBounds, zoom, canvas, {
-      kind: contributionIndex === "" ? "probability" : "contribution",
+      kind: isCoverage || contributionIndex === "" ? "probability" : "contribution",
       opacity: 1,
     });
   }
-  if (state.layers.credible) {
-    drawRasterInView(ctx, analysis.credibleRegion.mask, viewBounds, zoom, canvas, {
+  const mask = isCoverage ? analysis.flightMask : analysis.credibleRegion.mask;
+  if (state.layers.credible && mask) {
+    drawRasterInView(ctx, mask, viewBounds, zoom, canvas, {
       kind: "credible",
       opacity: 1,
     });
@@ -1068,7 +1391,12 @@ async function drawVisiblePreviewLayers(ctx, viewBounds, zoom, canvas) {
   if (state.layers.sightings) {
     drawSightings(ctx, state.sightings, viewBounds, zoom, canvas, state.selectedSighting);
   }
-  drawMostLikely(ctx, analysis.mostLikely, viewBounds, zoom, canvas);
+  if (isCoverage) {
+    drawFlightArea(ctx, analysis.flightArea || state.flightArea, viewBounds, zoom, canvas);
+    drawRecommendedLaunch(ctx, analysis.recommendedLaunch, viewBounds, zoom, canvas);
+  } else {
+    drawMostLikely(ctx, analysis.mostLikely, viewBounds, zoom, canvas);
+  }
 }
 
 function downloadCanvas(canvas, filename) {

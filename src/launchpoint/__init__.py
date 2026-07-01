@@ -15,8 +15,18 @@ The heatmap is probabilistic; ~100% accuracy is neither expected nor claimed.
 from launchpoint.core.sighting import Sighting
 from launchpoint.core.grid import RasterGrid
 from launchpoint.config import Config
+from launchpoint.coverage import CoverageEstimate, FlightArea
 
-__all__ = ["Sighting", "RasterGrid", "Config", "find_origin", "__version__"]
+__all__ = [
+    "Sighting",
+    "RasterGrid",
+    "Config",
+    "CoverageEstimate",
+    "FlightArea",
+    "find_origin",
+    "plan_launch_area",
+    "__version__",
+]
 
 __version__ = "0.5.0"
 
@@ -26,3 +36,10 @@ def find_origin(*args, **kwargs):
     from launchpoint.pipeline import find_origin as _find_origin
 
     return _find_origin(*args, **kwargs)
+
+
+def plan_launch_area(*args, **kwargs):
+    """Lazy import wrapper for the reverse coverage planner."""
+    from launchpoint.coverage import plan_launch_area as _plan_launch_area
+
+    return _plan_launch_area(*args, **kwargs)

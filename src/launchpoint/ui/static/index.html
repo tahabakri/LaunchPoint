@@ -24,6 +24,19 @@
         </header>
 
         <section class="panel-section">
+          <div class="segmented mode-switch" role="tablist" aria-label="Analysis mode">
+            <button class="mode-segment active" data-mode="origin" type="button">
+              <i data-lucide="crosshair"></i>
+              <span>Origin finder</span>
+            </button>
+            <button class="mode-segment" data-mode="coverage" type="button">
+              <i data-lucide="circle-dot"></i>
+              <span>Coverage planner</span>
+            </button>
+          </div>
+        </section>
+
+        <section id="sightingsPanel" class="panel-section">
           <div class="section-head">
             <h2>Sightings</h2>
             <span id="sightingCount" class="count-pill">0</span>
@@ -43,6 +56,35 @@
             <input id="fileInput" type="file" accept=".json,.csv,application/json,text/csv" hidden />
           </div>
           <div id="sightingList" class="sighting-list"></div>
+        </section>
+
+        <section id="coveragePanel" class="panel-section" hidden>
+          <div class="section-head">
+            <h2>Flight area</h2>
+            <span id="flightAreaState" class="count-pill muted">Unset</span>
+          </div>
+          <button id="drawFlightAreaButton" class="control-button primary" type="button">
+            <i data-lucide="circle-plus"></i>
+            <span>Draw circle</span>
+          </button>
+          <label class="field">
+            <span>Radius</span>
+            <div class="input-with-unit">
+              <input id="flightRadiusInput" type="number" min="100" step="100" value="1200" />
+              <span>m</span>
+            </div>
+          </label>
+          <label class="field">
+            <span>Mission altitude</span>
+            <div class="input-with-unit">
+              <input id="missionAltitudeInput" type="number" min="0" step="5" value="100" />
+              <span>m AGL</span>
+            </div>
+          </label>
+          <label class="field">
+            <span>Coverage samples</span>
+            <input id="coverageSampleInput" type="number" min="1" step="4" value="49" />
+          </label>
         </section>
 
         <section class="panel-section">
@@ -205,11 +247,11 @@
           </div>
           <div class="metric-grid">
             <div class="metric">
-              <span>Most likely</span>
+              <span id="primaryMetricLabel">Most likely</span>
               <strong id="mostLikelyValue">-</strong>
             </div>
             <div class="metric">
-              <span>50% area</span>
+              <span id="secondaryMetricLabel">50% area</span>
               <strong id="credibleAreaValue">-</strong>
             </div>
           </div>

@@ -262,6 +262,42 @@ export function drawMostLikely(ctx, point, viewBounds, zoom, canvas) {
   ctx.restore();
 }
 
+export function drawRecommendedLaunch(ctx, point, viewBounds, zoom, canvas) {
+  if (!point) return;
+  const p = pointToCanvas(point.lon, point.lat, viewBounds, zoom, canvas);
+  ctx.save();
+  ctx.fillStyle = "rgba(85,214,194,0.96)";
+  ctx.strokeStyle = "rgba(8,16,19,0.92)";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(p.x, p.y - 12);
+  ctx.lineTo(p.x + 10, p.y + 8);
+  ctx.lineTo(p.x - 10, p.y + 8);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
+export function drawFlightArea(ctx, area, viewBounds, zoom, canvas) {
+  if (!area?.center || !Number.isFinite(area.radiusM)) return;
+  const center = pointToCanvas(area.center.lon, area.center.lat, viewBounds, zoom, canvas);
+  const metersPerDegLon = 111320 * Math.cos((area.center.lat * Math.PI) / 180);
+  const edgeLon = area.center.lon + area.radiusM / Math.max(metersPerDegLon, 1);
+  const edge = pointToCanvas(edgeLon, area.center.lat, viewBounds, zoom, canvas);
+  const radiusPx = Math.abs(edge.x - center.x);
+  ctx.save();
+  ctx.fillStyle = "rgba(85,214,194,0.08)";
+  ctx.strokeStyle = "rgba(85,214,194,0.88)";
+  ctx.lineWidth = 2;
+  ctx.setLineDash([8, 6]);
+  ctx.beginPath();
+  ctx.arc(center.x, center.y, radiusPx, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
 export async function drawOsmBasemap(ctx, viewBounds, zoom, canvas, template) {
   const viewNW = lonLatToWorldPixel(viewBounds.west, viewBounds.north, zoom);
   const viewSE = lonLatToWorldPixel(viewBounds.east, viewBounds.south, zoom);

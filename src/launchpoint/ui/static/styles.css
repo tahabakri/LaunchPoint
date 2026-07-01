@@ -194,6 +194,7 @@ summary:focus-visible {
 .control-button,
 .icon-button,
 .segment,
+.mode-segment,
 .layer-toggle,
 .run-button,
 .collapse-button {
@@ -226,6 +227,7 @@ summary:focus-visible {
 .control-button:hover,
 .icon-button:hover,
 .segment:hover,
+.mode-segment:hover,
 .layer-toggle:hover,
 .collapse-button:hover {
   border-color: var(--border-strong);
@@ -236,6 +238,42 @@ summary:focus-visible {
 .run-button {
   border-color: rgba(85, 214, 194, 0.46);
   background: linear-gradient(180deg, rgba(85, 214, 194, 0.2), rgba(85, 214, 194, 0.1));
+  color: var(--text-strong);
+}
+
+.radius-handle {
+  width: 18px;
+  height: 18px;
+  border: 3px solid rgba(8, 16, 19, 0.92);
+  border-radius: 50%;
+  background: var(--amber);
+  box-shadow: 0 0 0 2px rgba(240, 181, 77, 0.45);
+}
+
+.launch-marker {
+  width: 0;
+  height: 0;
+  border-right: 12px solid transparent;
+  border-bottom: 22px solid var(--cyan);
+  border-left: 12px solid transparent;
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.55));
+}
+
+.mode-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.mode-segment {
+  min-width: 0;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.mode-segment.active {
+  border-color: rgba(85, 214, 194, 0.46);
+  background: var(--cyan-soft);
   color: var(--text-strong);
 }
 

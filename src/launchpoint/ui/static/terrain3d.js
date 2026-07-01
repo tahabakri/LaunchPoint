@@ -23,7 +23,8 @@ export class TerrainScene {
     this.meshGroup = new THREE.Group();
     this.extrusionGroup = new THREE.Group();
     this.rayGroup = new THREE.Group();
-    this.root.add(this.meshGroup, this.extrusionGroup, this.rayGroup);
+    this.coverageGroup = new THREE.Group();
+    this.root.add(this.meshGroup, this.extrusionGroup, this.rayGroup, this.coverageGroup);
 
     this.scene.add(new THREE.HemisphereLight(0xb9e8df, 0x172326, 1.4));
     const sun = new THREE.DirectionalLight(0xffffff, 1.7);
@@ -129,6 +130,7 @@ export class TerrainScene {
     clearGroup(this.meshGroup);
     clearGroup(this.extrusionGroup);
     clearGroup(this.rayGroup);
+    clearGroup(this.coverageGroup);
 
     let maxExtent = 2000;
     this.tiles.forEach((tile) => {
@@ -140,6 +142,7 @@ export class TerrainScene {
     this.updateCamera();
     this.addExtrusions();
     this.addRays();
+    this.addCoveragePlan();
   }
 
   buildTileMesh(tile) {
@@ -202,8 +205,11 @@ export class TerrainScene {
       0.16 + normalizedElevation * 0.28,
       0.18 + normalizedElevation * 0.2
     );
-    if (this.options.showProbability && this.options.analysis?.probability) {
-      const p = rasterValueAt(this.options.analysis.probability, lat, lon);
+    const heatRaster = this.options.analysis?.kind === "coverage"
+      ? this.options.analysis.coverage
+      : this.options.analysis?.probability;
+    if (this.options.showProbability && heatRaster) {
+      const p = rasterValueAt(heatRaster, lat, lon);
       if (p !== null && Number.isFinite(p) && p > 0.02) {
         const [r, g, b] = heatColor(p, 1);
         const heat = new THREE.Color(r / 255, g / 255, b / 255);
@@ -312,6 +318,40 @@ export class TerrainScene {
       });
       const geometry = new THREE.BufferGeometry().setFromPoints([start, end]);
       this.rayGroup.add(new THREE.Line(geometry, material));
+    }
+  }
+
+  addCoveragePlan() {
+    const analysis = this.options.analysis;
+    if (analysis?.kind !== "coverage") return;
+    const area = this.options.flightArea || analysis.flightArea;
+    if (area?.center && Number.isFinite(area.radiusM)) {
+      const points = [];
+      for (let i = 0; i <= 96; i += 1) {
+        const angle = (i / 96) * Math.PI * 2;
+        const metersPerDegLon = METERS_PER_DEG_LAT * Math.cos((area.center.lat * Math.PI) / 180);
+        const lon = area.center.lon + (Math.cos(angle) * area.radiusM) / Math.max(metersPerDegLon, 1);
+        const lat = area.center.lat + (Math.sin(angle) * area.radiusM) / METERS_PER_DEG_LAT;
+        points.push(this.pointVector(lon, lat, Math.max(area.altitudeAglM || 0, 1)));
+      }
+      const material = new THREE.LineBasicMaterial({
+        color: 0x55d6c2,
+        transparent: true,
+        opacity: 0.85,
+      });
+      this.coverageGroup.add(new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(points),
+        material
+      ));
+    }
+    if (analysis.recommendedLaunch) {
+      const position = this.pointVector(analysis.recommendedLaunch.lon, analysis.recommendedLaunch.lat, 5);
+      const geometry = new THREE.ConeGeometry(70, 180, 3);
+      const material = new THREE.MeshStandardMaterial({ color: 0x55d6c2, roughness: 0.55 });
+      const marker = new THREE.Mesh(geometry, material);
+      marker.position.copy(position);
+      marker.rotation.x = Math.PI;
+      this.coverageGroup.add(marker);
     }
   }
 

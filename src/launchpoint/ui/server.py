@@ -21,6 +21,12 @@ import numpy as np
 from rasterio.io import MemoryFile
 
 from launchpoint.config import Config, DEFAULT_ANALYSIS_RESOLUTION_M, MonteCarloConfig
+from launchpoint.coverage import (
+    CoverageEstimate,
+    FlightArea,
+    flight_area_bbox,
+    plan_launch_area,
+)
 from launchpoint.core.geo import BBox, Projector, aoi_for_sightings
 from launchpoint.core.grid import RasterGrid
 from launchpoint.core.sighting import Sighting
@@ -44,6 +50,14 @@ class RunRecord:
 
 
 @dataclass
+class CoverageRunRecord:
+    estimate: CoverageEstimate
+    area: FlightArea
+    stack: SurfaceStack
+    metadata: dict
+
+
+@dataclass
 class RunJob:
     run_id: str
     status: str = "queued"
@@ -51,24 +65,24 @@ class RunJob:
     stages: list[dict] = field(default_factory=list)
     started_at: float = field(default_factory=time.perf_counter)
     completed_at: float | None = None
-    record: RunRecord | None = None
+    record: RunRecord | CoverageRunRecord | None = None
     error: str | None = None
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
 class RunStore:
     def __init__(self) -> None:
-        self._records: dict[str, RunRecord] = {}
+        self._records: dict[str, RunRecord | CoverageRunRecord] = {}
         self._jobs: dict[str, RunJob] = {}
         self._lock = threading.Lock()
 
-    def put(self, record: RunRecord, run_id: str | None = None) -> str:
+    def put(self, record: RunRecord | CoverageRunRecord, run_id: str | None = None) -> str:
         run_id = run_id or uuid.uuid4().hex
         with self._lock:
             self._records[run_id] = record
         return run_id
 
-    def get(self, run_id: str) -> RunRecord | None:
+    def get(self, run_id: str) -> RunRecord | CoverageRunRecord | None:
         with self._lock:
             record = self._records.get(run_id)
             if record is not None:
@@ -149,6 +163,29 @@ def _parse_sightings_payload(payload: dict | list) -> list[Sighting]:
     if not sightings:
         raise ValueError("add or import at least one sighting")
     return sightings
+
+
+def _parse_flight_area_payload(payload: dict) -> FlightArea:
+    raw = payload.get("flightArea", payload.get("area", {})) if isinstance(payload, dict) else {}
+    if not isinstance(raw, dict):
+        raise ValueError("flight area must be an object")
+    center = raw.get("center") if isinstance(raw.get("center"), dict) else raw
+    lon = float(center.get("lon", center.get("lng")))
+    lat = float(center["lat"])
+    radius_m = float(raw.get("radius_m", raw.get("radiusM", raw.get("radius"))))
+    altitude_m = float(
+        raw.get(
+            "altitude_agl_m",
+            raw.get("altitudeAglM", raw.get("mission_altitude_agl_m", raw.get("altitude", 100))),
+        )
+    )
+    if not all(np.isfinite(v) for v in (lon, lat, radius_m, altitude_m)):
+        raise ValueError("flight area coordinates, radius, and altitude must be finite")
+    if radius_m <= 0:
+        raise ValueError("flight area radius must be positive")
+    if altitude_m < 0:
+        raise ValueError("mission altitude must be non-negative")
+    return FlightArea(center_lon=lon, center_lat=lat, radius_m=radius_m, altitude_agl_m=altitude_m)
 
 
 def _parse_csv_sightings(text: str) -> list[Sighting]:
@@ -380,6 +417,14 @@ def _stage_percent(stages: list[dict], status: str) -> float:
         total = max(int(details.get("total") or 0), 1)
         current = min(max(int(details.get("current") or 1), 1), total)
         return 0.35 + 0.55 * ((current - 1) / total)
+    coverage = stages_by_name.get("Run coverage")
+    if coverage:
+        if coverage.get("status") == "complete":
+            return 0.9
+        details = coverage.get("details") or {}
+        total = max(int(details.get("total") or 0), 1)
+        current = min(max(int(details.get("current") or 1), 1), total)
+        return 0.35 + 0.55 * ((current - 1) / total)
     if stages_by_name.get("Fetch surfaces", {}).get("status") == "complete":
         return 0.35
     fetch = stages_by_name.get("Fetch surfaces")
@@ -580,6 +625,28 @@ def _analysis_payload(run_id: str, record: RunRecord) -> dict:
     }
 
 
+def _coverage_payload(run_id: str, record: CoverageRunRecord) -> dict:
+    est = record.estimate
+    lon, lat = est.recommended_lonlat
+    area = record.area
+    return {
+        "runId": run_id,
+        "kind": "coverage",
+        "flightArea": {
+            "center": {"lon": area.center_lon, "lat": area.center_lat},
+            "radiusM": area.radius_m,
+            "altitudeAglM": area.altitude_agl_m,
+        },
+        "recommendedLaunch": {"lon": lon, "lat": lat},
+        "topLaunchAreas": est.top_launch_areas,
+        "samplePoints": est.sample_points,
+        "coverage": _serialize_grid(est.coverage, est.projector),
+        "flightMask": _serialize_grid(est.flight_mask, est.projector, precision=1),
+        "surfaceLayers": _surface_layers(record.stack, est.projector),
+        "metadata": record.metadata,
+    }
+
+
 def _run_analysis(payload: dict, job: RunJob | None = None) -> tuple[str, RunRecord]:
     job = job or RunJob(run_id=uuid.uuid4().hex)
     sightings = _parse_sightings_payload(payload)
@@ -711,9 +778,144 @@ def _run_analysis(payload: dict, job: RunJob | None = None) -> tuple[str, RunRec
     return run_id, record
 
 
+def _run_coverage(payload: dict, job: RunJob | None = None) -> tuple[str, CoverageRunRecord]:
+    job = job or RunJob(run_id=uuid.uuid4().hex)
+    area = _parse_flight_area_payload(payload)
+    config, layer_flags = _config_from_payload(payload)
+    settings = payload.get("settings", {}) if isinstance(payload, dict) else {}
+    sample_count = int(settings.get("coverage_sample_count", settings.get("sample_count", 49)))
+    if sample_count <= 0:
+        raise ValueError("coverage sample count must be positive")
+    started = time.perf_counter()
+    job.started_at = started
+
+    _mark_job_stage(job, "Prepare AOI", "running", "Preparing coverage area")
+    projector = Projector.for_point(area.center_lon, area.center_lat)
+    bbox = flight_area_bbox(area, projector, config)
+    aoi_details = _aoi_details(bbox, config.coarse_resolution_m)
+    override_size = bool(settings.get("override_cell_limit", False))
+    _enforce_analysis_size(aoi_details, override=override_size)
+    _mark_job_stage(
+        job,
+        "Prepare AOI",
+        "complete",
+        (
+            f"AOI {bbox.width / 1000:.1f} x {bbox.height / 1000:.1f} km "
+            f"at {config.coarse_resolution_m:g} m"
+        ),
+        aoi_details,
+    )
+
+    _mark_job_stage(
+        job,
+        "Fetch surfaces",
+        "running",
+        "Fetching DSM, canopy, and building surfaces",
+        aoi_details,
+    )
+    from launchpoint.data.surface import build_surface_stack_for_bbox
+
+    stack = build_surface_stack_for_bbox(
+        [],
+        config,
+        projector,
+        bbox,
+        progress_callback=lambda name, status, message, details: _mark_job_stage(
+            job, name, status, message, details
+        ),
+        **layer_flags,
+    )
+    surface_details = {
+        **aoi_details,
+        "rows": stack.occluder.rows,
+        "cols": stack.occluder.cols,
+        "cells": int(stack.occluder.data.size),
+        "layers": {
+            "dsm": True,
+            "bareEarth": True,
+            "canopyHeight": stack.canopy_height is not None,
+            "buildingHeight": stack.building_height is not None,
+            "launchWeight": True,
+        },
+    }
+    _mark_job_stage(
+        job,
+        "Fetch surfaces",
+        "complete",
+        f"Surfaces ready: {stack.occluder.rows} x {stack.occluder.cols} cells",
+        surface_details,
+    )
+
+    _mark_job_stage(
+        job,
+        "Run coverage",
+        "running",
+        f"Starting coverage planner for {sample_count} target sample(s)",
+        {"current": 0, "total": sample_count},
+    )
+    estimate = plan_launch_area(
+        area,
+        config=config,
+        occluder=stack.occluder,
+        ground=stack.ground,
+        projector=projector,
+        launch_weight=stack.launch_weight,
+        sample_count=sample_count,
+        progress_callback=lambda name, status, message, details: _mark_job_stage(
+            job, name, status, message, details
+        ),
+    )
+
+    _mark_job_stage(job, "Serialize result", "running", "Preparing coverage exports")
+    metadata = {
+        **estimate.metadata,
+        "analysisResolutionM": config.coarse_resolution_m,
+        "maxRangeM": config.max_range_m,
+        "gpuMode": _gpu_mode(config.prefer_gpu),
+        "cacheDir": config.cache_dir,
+        "canopySource": config.canopy_source,
+        "canopyGroundFloorM": config.canopy.effective_ground_floor_m(config.canopy_source),
+        "aoi": surface_details,
+        "layers": {
+            "dsm": True,
+            "bareEarth": True,
+            "canopyHeight": stack.canopy_height is not None,
+            "buildingHeight": stack.building_height is not None,
+            "launchWeight": True,
+        },
+        "stages": [],
+        "elapsedMs": int((time.perf_counter() - started) * 1000),
+    }
+    _mark_job_stage(job, "Serialize result", "complete", "Coverage metadata ready")
+    _mark_job_stage(job, "Export ready", "complete", "GeoTIFF and PNG preview are available")
+
+    record = CoverageRunRecord(estimate=estimate, area=area, stack=stack, metadata=metadata)
+    run_id = RUN_STORE.put(record, run_id=job.run_id)
+    with job.lock:
+        job.record = record
+        job.status = "complete"
+        job.message = "Coverage analysis complete"
+        job.completed_at = time.perf_counter()
+    snapshot = _job_snapshot(job)
+    metadata["stages"] = snapshot["stages"]
+    metadata["elapsedMs"] = snapshot["elapsedMs"]
+    return run_id, record
+
+
 def _run_analysis_job(job: RunJob, payload: dict) -> None:
     try:
         _run_analysis(payload, job=job)
+    except Exception as exc:  # noqa: BLE001 - worker boundary
+        with job.lock:
+            job.status = "error"
+            job.message = str(exc)
+            job.error = str(exc)
+            job.completed_at = time.perf_counter()
+
+
+def _run_coverage_job(job: RunJob, payload: dict) -> None:
+    try:
+        _run_coverage(payload, job=job)
     except Exception as exc:  # noqa: BLE001 - worker boundary
         with job.lock:
             job.status = "error"
@@ -796,6 +998,34 @@ class LaunchPointHandler(BaseHTTPRequestHandler):
                 return
             _json_response(self, _analysis_payload(run_id, job.record))
             return
+        if parsed.path == "/api/coverage-runs/status":
+            params = parse_qs(parsed.query)
+            run_id = params.get("run_id", [""])[0]
+            job = RUN_STORE.get_job(run_id)
+            if job is None:
+                _error_response(self, "unknown run_id", status=HTTPStatus.NOT_FOUND)
+                return
+            _json_response(self, _job_snapshot(job))
+            return
+        if parsed.path == "/api/coverage-runs/result":
+            params = parse_qs(parsed.query)
+            run_id = params.get("run_id", [""])[0]
+            job = RUN_STORE.get_job(run_id)
+            if job is None:
+                _error_response(self, "unknown run_id", status=HTTPStatus.NOT_FOUND)
+                return
+            snapshot = _job_snapshot(job)
+            if job.status == "error":
+                _json_response(self, snapshot, status=HTTPStatus.BAD_REQUEST)
+                return
+            if job.record is None:
+                _json_response(self, snapshot, status=HTTPStatus.ACCEPTED)
+                return
+            if not isinstance(job.record, CoverageRunRecord):
+                _error_response(self, "run_id is not a coverage run", status=HTTPStatus.BAD_REQUEST)
+                return
+            _json_response(self, _coverage_payload(run_id, job.record))
+            return
         if parsed.path == "/api/runs/diagnostic-layer":
             params = parse_qs(parsed.query)
             run_id = params.get("run_id", [""])[0]
@@ -817,12 +1047,17 @@ class LaunchPointHandler(BaseHTTPRequestHandler):
             if record is None:
                 _error_response(self, "unknown run_id", status=HTTPStatus.NOT_FOUND)
                 return
-            data = _geotiff_bytes(record.estimate.probability)
+            if isinstance(record, CoverageRunRecord):
+                data = _geotiff_bytes(record.estimate.coverage)
+                stem = "launchpoint_coverage"
+            else:
+                data = _geotiff_bytes(record.estimate.probability)
+                stem = "launchpoint_probability"
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "image/tiff")
             self.send_header(
                 "Content-Disposition",
-                f'attachment; filename="launchpoint_probability_{run_id[:8]}.tif"',
+                f'attachment; filename="{stem}_{run_id[:8]}.tif"',
             )
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
@@ -858,6 +1093,18 @@ class LaunchPointHandler(BaseHTTPRequestHandler):
                     args=(job, payload),
                     daemon=True,
                     name=f"launchpoint-run-{job.run_id[:8]}",
+                )
+                thread.start()
+                _json_response(self, _job_snapshot(job), status=HTTPStatus.ACCEPTED)
+                return
+            if parsed.path == "/api/coverage-runs":
+                payload = _read_json(self)
+                job = RUN_STORE.create_job()
+                thread = threading.Thread(
+                    target=_run_coverage_job,
+                    args=(job, payload),
+                    daemon=True,
+                    name=f"launchpoint-coverage-{job.run_id[:8]}",
                 )
                 thread.start()
                 _json_response(self, _job_snapshot(job), status=HTTPStatus.ACCEPTED)
