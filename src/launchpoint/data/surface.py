@@ -152,14 +152,23 @@ def build_surface_stack(
         "occluder": cache_key("dsm", bbox, epsg, res),
         "ground": cache_key(f"bare_earth_{src}", bbox, epsg, res),
         "launch": cache_key(f"launch_weight_{src}", bbox, epsg, res),
+        "canopy": cache_key(f"canopy_height_{src}", bbox, epsg, res),
+        "building": cache_key("building_height", bbox, epsg, res),
     }
+    required_keys = ["occluder", "ground", "launch"]
+    if use_canopy:
+        required_keys.append("canopy")
+    if use_buildings:
+        required_keys.append("building")
 
-    if use_cache and all(cache.has(k) for k in keys.values()):
+    if use_cache and all(cache.has(keys[name]) for name in required_keys):
         log.info("surfaces served from cache for AOI epsg:%s @ %g m", epsg, res)
         return SurfaceStack(
             occluder=cache.load(keys["occluder"]),
             ground=cache.load(keys["ground"]),
             launch_weight=cache.load(keys["launch"]),
+            canopy_height=cache.load(keys["canopy"]) if use_canopy else None,
+            building_height=cache.load(keys["building"]) if use_buildings else None,
         )
 
     reporter = FetchReporter(progress_callback)
@@ -218,6 +227,10 @@ def build_surface_stack(
         cache.save(keys["occluder"], occluder)
         cache.save(keys["ground"], ground)
         cache.save(keys["launch"], launch_weight)
+        if canopy is not None:
+            cache.save(keys["canopy"], canopy)
+        if building is not None:
+            cache.save(keys["building"], building)
 
     return SurfaceStack(
         occluder=occluder,

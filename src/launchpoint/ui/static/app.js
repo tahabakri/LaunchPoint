@@ -33,6 +33,7 @@ const state = {
     markers: null,
     rays: null,
   },
+  diagnosticRequestId: 0,
   layers: {
     probability: true,
     credible: true,
@@ -40,6 +41,7 @@ const state = {
   },
   activeView: "map",
   activeDiagnostic: "",
+  diagnosticOpacity: 0.85,
   tileSources: {
     map: OSM_TEMPLATE,
     terrain: "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png",
@@ -76,8 +78,12 @@ function cacheElements() {
     "gpuInput",
     "canopyInput",
     "canopySourceSelect",
+    "resolutionSelect",
+    "resolutionHint",
     "buildingsInput",
     "cacheInput",
+    "overrideSizeInput",
+    "overrideSizeHint",
     "runButton",
     "runProgress",
     "runProgressBar",
@@ -92,6 +98,8 @@ function cacheElements() {
     "inspectorBody",
     "timeline",
     "contributionSelect",
+    "diagnosticOpacityInput",
+    "diagnosticOpacityValue",
     "metadataList",
     "rightRail",
     "collapseRightButton",
@@ -122,12 +130,15 @@ function initMap() {
   state.map.createPane("diagnosticPane");
   state.map.createPane("heatmapPane");
   state.map.createPane("maskPane");
-  state.map.getPane("diagnosticPane").style.zIndex = 340;
+  state.map.getPane("diagnosticPane").style.zIndex = 370;
   state.map.getPane("heatmapPane").style.zIndex = 350;
   state.map.getPane("maskPane").style.zIndex = 360;
 
   state.map.on("click", handleMapClick);
   state.map.on("mousemove", handleMapHover);
+  state.map.on("moveend zoomend", () => {
+    if (state.activeDiagnostic === "canopyHeight") updateRasterOverlays();
+  });
 }
 
 function initTerrain() {
@@ -156,6 +167,16 @@ function bindEvents() {
     syncTerrainState();
   });
   el.contributionSelect.addEventListener("change", updateRasterOverlays);
+  el.canopySourceSelect.addEventListener("change", syncResolutionOptions);
+  el.canopyInput.addEventListener("change", syncResolutionOptions);
+  el.overrideSizeInput.addEventListener("change", () => {
+    el.overrideSizeHint.hidden = !el.overrideSizeInput.checked;
+  });
+  el.diagnosticOpacityInput.addEventListener("input", () => {
+    state.diagnosticOpacity = readDiagnosticOpacity();
+    updateDiagnosticOpacityLabel();
+    updateRasterOverlays();
+  });
   el.collapseRightButton.addEventListener("click", () => {
     el.rightRail.classList.toggle("collapsed");
   });
@@ -189,6 +210,32 @@ function bindEvents() {
       syncTerrainState();
     });
   });
+  state.diagnosticOpacity = readDiagnosticOpacity();
+  updateDiagnosticOpacityLabel();
+  syncResolutionOptions();
+}
+
+// Sub-10 m model resolutions only make sense with the Meta 1 m canopy source
+// (the backend rejects them otherwise), so disable those options and snap the
+// selection back to 10 m when the user isn't on Meta.
+function syncResolutionOptions() {
+  if (!el.resolutionSelect) return;
+  const fineAllowed = el.canopyInput.checked && el.canopySourceSelect.value === "meta";
+  let snapped = false;
+  for (const option of el.resolutionSelect.options) {
+    if (option.dataset.requiresMeta === undefined) continue;
+    option.disabled = !fineAllowed;
+    if (!fineAllowed && option.selected) {
+      el.resolutionSelect.value = "10";
+      snapped = true;
+    }
+  }
+  if (el.resolutionHint) {
+    el.resolutionHint.classList.toggle("warn", snapped);
+    el.resolutionHint.textContent = fineAllowed
+      ? "Sub-10 m feeds the model near-native Meta 1 m detail."
+      : "Sub-10 m needs the Meta 1 m canopy source.";
+  }
 }
 
 async function fetchDefaults() {
@@ -482,6 +529,7 @@ function drawPreviewFan(group, origin, maxRange) {
 }
 
 function clearRasterOverlays() {
+  state.diagnosticRequestId += 1;
   ["heatmap", "credible", "diagnostic"].forEach((name) => {
     if (state.overlays[name]) {
       state.map.removeLayer(state.overlays[name]);
@@ -490,24 +538,21 @@ function clearRasterOverlays() {
   });
 }
 
-function updateRasterOverlays() {
+async function updateRasterOverlays() {
   clearRasterOverlays();
   const analysis = state.analysis;
   if (!analysis) return;
+  const requestId = state.diagnosticRequestId;
 
   const contributionIndex = el.contributionSelect.value;
   const baseRaster = contributionIndex === ""
     ? analysis.probability
     : analysis.perSighting[Number(contributionIndex)]?.raster;
 
-  if (state.activeDiagnostic && analysis.surfaceLayers[state.activeDiagnostic]) {
-    const layer = analysis.surfaceLayers[state.activeDiagnostic];
-    state.overlays.diagnostic = L.imageOverlay(
-      rasterToDataUrl(layer, { kind: state.activeDiagnostic, opacity: 0.85 }),
-      leafletBounds(layer),
-      { pane: "diagnosticPane", opacity: 1 }
-    ).addTo(state.map);
-  }
+  const fallbackDiagnostic = state.activeDiagnostic
+    ? analysis.surfaceLayers[state.activeDiagnostic]
+    : null;
+  if (fallbackDiagnostic) renderDiagnosticOverlay(fallbackDiagnostic);
 
   if (state.layers.probability && baseRaster) {
     state.overlays.heatmap = L.imageOverlay(
@@ -528,6 +573,26 @@ function updateRasterOverlays() {
       { pane: "maskPane", opacity: 1 }
     ).addTo(state.map);
   }
+
+  const diagnostic = await loadVisibleDiagnosticLayer();
+  if (requestId !== state.diagnosticRequestId || !diagnostic) return;
+  if (state.overlays.diagnostic) {
+    state.map.removeLayer(state.overlays.diagnostic);
+    state.overlays.diagnostic = null;
+  }
+  renderDiagnosticOverlay(diagnostic);
+}
+
+function renderDiagnosticOverlay(layer) {
+  state.overlays.diagnostic = L.imageOverlay(
+    rasterToDataUrl(layer, {
+      kind: state.activeDiagnostic,
+      opacity: state.diagnosticOpacity,
+      solid: true,
+    }),
+    leafletBounds(layer),
+    { pane: "diagnosticPane", opacity: 1 }
+  ).addTo(state.map);
 }
 
 function leafletBounds(raster) {
@@ -536,6 +601,38 @@ function leafletBounds(raster) {
     [b.south, b.west],
     [b.north, b.east],
   ];
+}
+
+async function loadVisibleDiagnosticLayer(viewBounds = null) {
+  const analysis = state.analysis;
+  if (!analysis?.runId || state.activeDiagnostic !== "canopyHeight") return null;
+  if (!analysis.surfaceLayers.canopyHeight) return null;
+  const bounds = viewBounds || mapViewBounds();
+  const params = new URLSearchParams({
+    run_id: analysis.runId,
+    layer: "canopyHeight",
+    west: String(bounds.west),
+    south: String(bounds.south),
+    east: String(bounds.east),
+    north: String(bounds.north),
+  });
+  try {
+    const response = await fetch(`/api/runs/diagnostic-layer?${params.toString()}`);
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+function mapViewBounds() {
+  const bounds = state.map.getBounds();
+  return {
+    west: bounds.getWest(),
+    south: bounds.getSouth(),
+    east: bounds.getEast(),
+    north: bounds.getNorth(),
+  };
 }
 
 async function handleImport(event) {
@@ -655,8 +752,10 @@ function readSettings() {
     prefer_gpu: el.gpuInput.checked,
     use_canopy: el.canopyInput.checked,
     canopy_source: el.canopySourceSelect.value,
+    analysis_resolution_m: Number(el.resolutionSelect.value),
     use_buildings: el.buildingsInput.checked,
     use_cache: el.cacheInput.checked,
+    override_cell_limit: el.overrideSizeInput.checked,
   };
 }
 
@@ -922,37 +1021,25 @@ async function exportPngPreview() {
   canvas.width = 1280;
   canvas.height = 800;
   const ctx = canvas.getContext("2d");
-  const bounds = state.map.getBounds();
-  const viewBounds = {
-    west: bounds.getWest(),
-    south: bounds.getSouth(),
-    east: bounds.getEast(),
-    north: bounds.getNorth(),
-  };
+  const viewBounds = mapViewBounds();
   const zoom = Math.round(state.map.getZoom());
 
   try {
     await drawOsmBasemap(ctx, viewBounds, zoom, canvas, state.tileSources.map || OSM_TEMPLATE);
-    drawVisiblePreviewLayers(ctx, viewBounds, zoom, canvas);
+    await drawVisiblePreviewLayers(ctx, viewBounds, zoom, canvas);
     downloadCanvas(canvas, `launchpoint_preview_${state.analysis.runId.slice(0, 8)}.png`);
   } catch {
     ctx.fillStyle = "#071114";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    drawVisiblePreviewLayers(ctx, viewBounds, zoom, canvas);
+    await drawVisiblePreviewLayers(ctx, viewBounds, zoom, canvas);
     downloadCanvas(canvas, `launchpoint_preview_${state.analysis.runId.slice(0, 8)}.png`);
   } finally {
     el.exportPngButton.disabled = false;
   }
 }
 
-function drawVisiblePreviewLayers(ctx, viewBounds, zoom, canvas) {
+async function drawVisiblePreviewLayers(ctx, viewBounds, zoom, canvas) {
   const analysis = state.analysis;
-  if (state.activeDiagnostic && analysis.surfaceLayers[state.activeDiagnostic]) {
-    drawRasterInView(ctx, analysis.surfaceLayers[state.activeDiagnostic], viewBounds, zoom, canvas, {
-      kind: state.activeDiagnostic,
-      opacity: 0.85,
-    });
-  }
   const contributionIndex = el.contributionSelect.value;
   const baseRaster = contributionIndex === ""
     ? analysis.probability
@@ -967,6 +1054,15 @@ function drawVisiblePreviewLayers(ctx, viewBounds, zoom, canvas) {
     drawRasterInView(ctx, analysis.credibleRegion.mask, viewBounds, zoom, canvas, {
       kind: "credible",
       opacity: 1,
+    });
+  }
+  if (state.activeDiagnostic && analysis.surfaceLayers[state.activeDiagnostic]) {
+    const diagnosticLayer = await loadVisibleDiagnosticLayer(viewBounds)
+      || analysis.surfaceLayers[state.activeDiagnostic];
+    drawRasterInView(ctx, diagnosticLayer, viewBounds, zoom, canvas, {
+      kind: state.activeDiagnostic,
+      opacity: state.diagnosticOpacity,
+      solid: true,
     });
   }
   if (state.layers.sightings) {
@@ -1001,6 +1097,19 @@ function distanceMeters(a, b) {
   const dl = ((b.lon - a.lon) * Math.PI) / 180;
   const h = Math.sin(dp / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
   return 2 * earth * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+function readDiagnosticOpacity() {
+  return clamp(Number(el.diagnosticOpacityInput?.value) || 0.85, 0.1, 1);
+}
+
+function updateDiagnosticOpacityLabel() {
+  if (!el.diagnosticOpacityValue) return;
+  el.diagnosticOpacityValue.textContent = `${Math.round(state.diagnosticOpacity * 100)}%`;
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
 }
 
 function escapeHtml(value) {

@@ -38,6 +38,9 @@ an elevated position.
 DEFAULT_DSM_RESOLUTION_M: float = 30.0
 """Native resolution of the Copernicus GLO-30 DSM, metres."""
 
+DEFAULT_ANALYSIS_RESOLUTION_M: float = 10.0
+"""Default grid resolution used by the model, metres."""
+
 DEFAULT_FINE_RESOLUTION_M: float = 2.0
 """Target resolution for the fine refinement pass (Phase 5).
 
@@ -87,7 +90,7 @@ class Config:
 
     max_range_m: float = DEFAULT_MAX_RANGE_M
     antenna_height_m: float = DEFAULT_ANTENNA_HEIGHT_M
-    coarse_resolution_m: float = DEFAULT_DSM_RESOLUTION_M
+    coarse_resolution_m: float = DEFAULT_ANALYSIS_RESOLUTION_M
     fine_resolution_m: float = DEFAULT_FINE_RESOLUTION_M
 
     combine: str = "min"

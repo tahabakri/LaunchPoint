@@ -20,8 +20,8 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 from rasterio.io import MemoryFile
 
-from launchpoint.config import Config, MonteCarloConfig
-from launchpoint.core.geo import Projector, aoi_for_sightings
+from launchpoint.config import Config, DEFAULT_ANALYSIS_RESOLUTION_M, MonteCarloConfig
+from launchpoint.core.geo import BBox, Projector, aoi_for_sightings
 from launchpoint.core.grid import RasterGrid
 from launchpoint.core.sighting import Sighting
 from launchpoint.data.surface import SurfaceStack, build_surface_stack
@@ -30,6 +30,9 @@ from launchpoint.pipeline import OriginEstimate, find_origin
 
 MAX_SERIALIZED_GRID_DIM = 420
 MAX_SERIALIZED_LAYER_DIM = 220
+MAX_DIAGNOSTIC_LAYER_DIM = 1024
+MAX_ANALYSIS_CELLS = 25_000_000
+ALLOWED_ANALYSIS_RESOLUTIONS_M = {1.0, 2.0, 5.0, 10.0, 30.0}
 
 
 @dataclass
@@ -182,10 +185,21 @@ def _config_from_payload(payload: dict) -> tuple[Config, dict]:
     canopy_source = str(settings.get("canopy_source", "eth"))
     if canopy_source not in ("eth", "meta"):
         canopy_source = "eth"
+    use_canopy = bool(settings.get("use_canopy", True))
+    use_buildings = bool(settings.get("use_buildings", True))
+    use_cache = bool(settings.get("use_cache", True))
+    resolution_raw = settings.get(
+        "analysis_resolution_m",
+        settings.get("coarse_resolution_m", DEFAULT_ANALYSIS_RESOLUTION_M),
+    )
+    analysis_resolution_m = _validate_analysis_resolution(
+        float(resolution_raw), use_canopy=use_canopy, canopy_source=canopy_source
+    )
 
     config = Config(
         max_range_m=max_range_m,
         antenna_height_m=antenna_height_m,
+        coarse_resolution_m=analysis_resolution_m,
         prefer_gpu=prefer_gpu,
         cache_dir=cache_dir,
         combine=combine,
@@ -193,11 +207,70 @@ def _config_from_payload(payload: dict) -> tuple[Config, dict]:
         monte_carlo=MonteCarloConfig(samples_per_sighting=samples),
     )
     layer_flags = {
-        "use_canopy": bool(settings.get("use_canopy", True)),
-        "use_buildings": bool(settings.get("use_buildings", True)),
-        "use_cache": bool(settings.get("use_cache", True)),
+        "use_canopy": use_canopy,
+        "use_buildings": use_buildings,
+        "use_cache": use_cache,
     }
     return config, layer_flags
+
+
+def _validate_analysis_resolution(
+    resolution_m: float,
+    *,
+    use_canopy: bool,
+    canopy_source: str,
+) -> float:
+    if not np.isfinite(resolution_m):
+        raise ValueError("analysis resolution must be finite")
+    selected = min(ALLOWED_ANALYSIS_RESOLUTIONS_M, key=lambda value: abs(value - resolution_m))
+    if abs(selected - resolution_m) > 1e-6:
+        allowed = ", ".join(f"{value:g} m" for value in sorted(ALLOWED_ANALYSIS_RESOLUTIONS_M))
+        raise ValueError(f"analysis resolution must be one of: {allowed}")
+    if selected < 10.0 and (not use_canopy or canopy_source != "meta"):
+        raise ValueError(
+            "analysis resolutions below 10 m require canopy enabled with the Meta 1 m source"
+        )
+    return float(selected)
+
+
+def _aoi_details(bbox, resolution_m: float) -> dict:
+    rows = max(1, int(np.ceil(bbox.height / resolution_m)))
+    cols = max(1, int(np.ceil(bbox.width / resolution_m)))
+    cells = rows * cols
+    return {
+        "widthM": round(float(bbox.width), 1),
+        "heightM": round(float(bbox.height), 1),
+        "areaKm2": round(float(bbox.width * bbox.height / 1e6), 3),
+        "resolutionM": float(resolution_m),
+        "estimatedRows": rows,
+        "estimatedCols": cols,
+        "estimatedCells": cells,
+        "rangeBufferMultiplier": 1.1,
+        "description": "Bounding box of sightings padded by max range x 1.1",
+    }
+
+
+def _enforce_analysis_size(aoi_details: dict, *, override: bool = False) -> None:
+    cells = int(aoi_details["estimatedCells"])
+    if cells <= MAX_ANALYSIS_CELLS:
+        return
+    if override:
+        # The cap is a soft guard against accidental OOM, not a hard ceiling.
+        # The caller has explicitly opted in to run an oversized grid on their
+        # own hardware, so let it through (it may still fail with MemoryError).
+        print(
+            f"WARNING: analysis grid size cap overridden: {cells:,} cells at "
+            f"{float(aoi_details['resolutionM']):g} m (cap {MAX_ANALYSIS_CELLS:,})"
+        )
+        return
+    resolution = float(aoi_details["resolutionM"])
+    raise ValueError(
+        "Analysis grid is too large: "
+        f"{cells:,} cells at {resolution:g} m resolution "
+        f"({aoi_details['estimatedRows']:,} x {aoi_details['estimatedCols']:,}). "
+        "Use a coarser model resolution, lower the max range, or enable "
+        "'Override grid-size limit' in Advanced to run it anyway."
+    )
 
 
 def _grid_lonlat_bounds(grid: RasterGrid, projector: Projector) -> dict:
@@ -370,6 +443,90 @@ def _surface_layers(stack: SurfaceStack, projector: Projector) -> dict:
     return layers
 
 
+def _native_canopy_resolution_m(source: str) -> float:
+    if source == "meta":
+        from launchpoint.data.canopy import NATIVE_RES_M
+
+        return float(NATIVE_RES_M)
+    from launchpoint.data.eth_canopy import NATIVE_RES_M
+
+    return float(NATIVE_RES_M)
+
+
+def _diagnostic_bbox_from_query(params: dict[str, list[str]], projector: Projector) -> BBox:
+    west = float(params.get("west", ["nan"])[0])
+    south = float(params.get("south", ["nan"])[0])
+    east = float(params.get("east", ["nan"])[0])
+    north = float(params.get("north", ["nan"])[0])
+    if not all(np.isfinite(v) for v in (west, south, east, north)):
+        raise ValueError("diagnostic bounds must include west,south,east,north")
+    if west >= east or south >= north:
+        raise ValueError("diagnostic bounds are empty")
+
+    xs, ys = projector.to_utm([west, west, east, east], [south, north, south, north])
+    return BBox(float(np.min(xs)), float(np.min(ys)), float(np.max(xs)), float(np.max(ys)))
+
+
+def _intersect_bbox(a: BBox, b: BBox) -> BBox | None:
+    minx = max(a.minx, b.minx)
+    miny = max(a.miny, b.miny)
+    maxx = min(a.maxx, b.maxx)
+    maxy = min(a.maxy, b.maxy)
+    if minx >= maxx or miny >= maxy:
+        return None
+    return BBox(minx, miny, maxx, maxy)
+
+
+def _diagnostic_resolution(bbox: BBox, native_resolution_m: float) -> float:
+    max_span = max(bbox.width, bbox.height)
+    capped_resolution = max_span / MAX_DIAGNOSTIC_LAYER_DIM
+    return max(native_resolution_m, capped_resolution)
+
+
+def _fetch_canopy_diagnostic_layer(record: RunRecord, bounds: BBox) -> RasterGrid:
+    source = str(record.metadata.get("canopySource", "eth"))
+    native_res = _native_canopy_resolution_m(source)
+    resolution = _diagnostic_resolution(bounds, native_res)
+    projector = record.estimate.projector
+    target = RasterGrid.empty(bounds, resolution, projector.utm_crs, fill=np.nan)
+
+    if source == "meta":
+        from launchpoint.data.canopy import fetch_canopy_height
+
+        return fetch_canopy_height(
+            target, projector, cache_dir=record.metadata.get("cacheDir"), reporter=None
+        )
+
+    from launchpoint.data.eth_canopy import fetch_canopy_height_eth
+
+    return fetch_canopy_height_eth(
+        target, projector, cache_dir=record.metadata.get("cacheDir"), reporter=None
+    )
+
+
+def _diagnostic_layer_payload(run_id: str, record: RunRecord, params: dict[str, list[str]]) -> dict:
+    layer = params.get("layer", [""])[0]
+    if layer != "canopyHeight":
+        raise ValueError("high-resolution diagnostics are only available for canopyHeight")
+    if not record.metadata.get("layers", {}).get("canopyHeight"):
+        raise ValueError("canopy layer is not available for this run")
+
+    requested = _diagnostic_bbox_from_query(params, record.estimate.projector)
+    bounds = _intersect_bbox(requested, record.stack.occluder.bounds)
+    if bounds is None:
+        raise ValueError("diagnostic bounds are outside the analysed area")
+
+    grid = _fetch_canopy_diagnostic_layer(record, bounds)
+    payload = _serialize_grid(
+        grid, record.estimate.projector, max_dim=MAX_DIAGNOSTIC_LAYER_DIM, precision=2
+    )
+    payload["source"] = record.metadata.get("canopySource", "eth")
+    payload["nativeResolutionM"] = _native_canopy_resolution_m(payload["source"])
+    payload["runId"] = run_id
+    payload["layer"] = layer
+    return payload
+
+
 def _analysis_payload(run_id: str, record: RunRecord) -> dict:
     est = record.estimate
     mask = est.credible_mask(0.5)
@@ -407,19 +564,10 @@ def _run_analysis(payload: dict, job: RunJob | None = None) -> tuple[str, RunRec
 
     _mark_job_stage(job, "Prepare AOI", "running", "Preparing analysis area")
     projector, bbox = aoi_for_sightings(sightings, config.max_range_m)
-    rows = max(1, int(np.ceil(bbox.height / config.coarse_resolution_m)))
-    cols = max(1, int(np.ceil(bbox.width / config.coarse_resolution_m)))
-    aoi_details = {
-        "widthM": round(float(bbox.width), 1),
-        "heightM": round(float(bbox.height), 1),
-        "areaKm2": round(float(bbox.width * bbox.height / 1e6), 3),
-        "resolutionM": float(config.coarse_resolution_m),
-        "estimatedRows": rows,
-        "estimatedCols": cols,
-        "estimatedCells": rows * cols,
-        "rangeBufferMultiplier": 1.1,
-        "description": "Bounding box of sightings padded by max range x 1.1",
-    }
+    aoi_details = _aoi_details(bbox, config.coarse_resolution_m)
+    settings = payload.get("settings", {}) if isinstance(payload, dict) else {}
+    override_size = bool(settings.get("override_cell_limit", False))
+    _enforce_analysis_size(aoi_details, override=override_size)
     _mark_job_stage(
         job,
         "Prepare AOI",
@@ -496,6 +644,7 @@ def _run_analysis(payload: dict, job: RunJob | None = None) -> tuple[str, RunRec
         "samples": config.monte_carlo.samples_per_sighting,
         "combine": config.combine,
         "canopySource": config.canopy_source,
+        "analysisResolutionM": config.coarse_resolution_m,
         "maxRangeM": config.max_range_m,
         "gpuMode": "gpu-preferred" if config.prefer_gpu else "cpu",
         "cacheDir": config.cache_dir,
@@ -583,6 +732,7 @@ class LaunchPointHandler(BaseHTTPRequestHandler):
                         "maxRangeM": 12000.0,
                         "samplesPerSighting": 64,
                         "antennaHeightM": 1.5,
+                        "analysisResolutionM": DEFAULT_ANALYSIS_RESOLUTION_M,
                         "preferGpu": True,
                     },
                     "tileSources": {
@@ -619,6 +769,20 @@ class LaunchPointHandler(BaseHTTPRequestHandler):
                 _json_response(self, snapshot, status=HTTPStatus.ACCEPTED)
                 return
             _json_response(self, _analysis_payload(run_id, job.record))
+            return
+        if parsed.path == "/api/runs/diagnostic-layer":
+            params = parse_qs(parsed.query)
+            run_id = params.get("run_id", [""])[0]
+            record = RUN_STORE.get(run_id)
+            if record is None:
+                _error_response(self, "unknown run_id", status=HTTPStatus.NOT_FOUND)
+                return
+            try:
+                _json_response(self, _diagnostic_layer_payload(run_id, record, params))
+            except ValueError as exc:
+                _error_response(self, str(exc), status=HTTPStatus.BAD_REQUEST)
+            except Exception as exc:  # noqa: BLE001 - optional diagnostic fetch boundary
+                _error_response(self, str(exc), status=HTTPStatus.BAD_GATEWAY)
             return
         if parsed.path == "/api/export/geotiff":
             params = parse_qs(parsed.query)

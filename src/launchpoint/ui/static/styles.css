@@ -359,6 +359,16 @@ summary:focus-visible {
   min-width: 150px;
 }
 
+.field-hint {
+  color: var(--muted-2);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.field-hint.warn {
+  color: var(--warn, #e0a458);
+}
+
 .field span,
 .toggle-line span {
   min-width: 0;

@@ -97,6 +97,19 @@
               <option value="meta">Meta 1 m — detailed, slow</option>
             </select>
           </label>
+          <label class="field">
+            <span>Model resolution</span>
+            <select id="resolutionSelect" class="select-control" aria-label="Analysis resolution">
+              <option value="30">30 m — coarse, fastest</option>
+              <option value="10" selected>10 m — default</option>
+              <option value="5" data-requires-meta>5 m — fine (Meta canopy)</option>
+              <option value="2" data-requires-meta>2 m — very fine (Meta canopy)</option>
+              <option value="1" data-requires-meta>1 m — native (Meta canopy)</option>
+            </select>
+            <small id="resolutionHint" class="field-hint">
+              Sub-10 m needs the Meta 1 m canopy source.
+            </small>
+          </label>
           <div class="toggle-stack">
             <label class="toggle-line">
               <input id="gpuInput" type="checkbox" checked />
@@ -114,7 +127,14 @@
               <input id="cacheInput" type="checkbox" checked />
               <span>Use cache</span>
             </label>
+            <label class="toggle-line">
+              <input id="overrideSizeInput" type="checkbox" />
+              <span>Override grid-size limit</span>
+            </label>
           </div>
+          <small id="overrideSizeHint" class="field-hint warn" hidden>
+            Bypasses the 25M-cell safety cap. Large grids may exhaust RAM/VRAM.
+          </small>
         </details>
       </aside>
 
@@ -257,6 +277,17 @@
               <span>Launch weight</span>
             </label>
           </div>
+          <label class="field">
+            <span>Diagnostic opacity <strong id="diagnosticOpacityValue">85%</strong></span>
+            <input
+              id="diagnosticOpacityInput"
+              type="range"
+              min="0.1"
+              max="1"
+              step="0.05"
+              value="0.85"
+            />
+          </label>
           <label class="field">
             <span>Contribution</span>
             <select id="contributionSelect" class="select-control">

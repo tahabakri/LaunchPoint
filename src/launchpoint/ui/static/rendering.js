@@ -91,6 +91,7 @@ export function rasterCellAt(raster, lat, lon) {
 export function rasterToCanvas(raster, options = {}) {
   const kind = options.kind || "probability";
   const opacity = options.opacity ?? 1;
+  const solid = options.solid ?? false;
   const canvas = document.createElement("canvas");
   canvas.width = raster.cols;
   canvas.height = raster.rows;
@@ -116,7 +117,7 @@ export function rasterToCanvas(raster, options = {}) {
         }
       } else {
         rgba = colorFromStops(stops, clamp((value - min) / span, 0, 1));
-        rgba[3] = Math.round(rgba[3] * opacity);
+        rgba[3] = Math.round((solid ? 255 : rgba[3]) * opacity);
       }
     }
     image.data[px] = rgba[0];
