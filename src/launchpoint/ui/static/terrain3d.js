@@ -1,9 +1,11 @@
 import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js";
 import { clamp, heatColor, rasterValueAt } from "./rendering.js";
+import { castViewshedFan, observerElevation } from "./raycast.js";
 
 const TILE_SIZE = 256;
 const SAMPLE_STEP = 8;
 const METERS_PER_DEG_LAT = 111320;
+const ANALYSIS_MESH_TARGET = 96;
 
 export class TerrainScene {
   constructor(host, options = {}) {
@@ -22,9 +24,10 @@ export class TerrainScene {
     this.scene.add(this.root);
     this.meshGroup = new THREE.Group();
     this.extrusionGroup = new THREE.Group();
+    this.pinGroup = new THREE.Group();
     this.rayGroup = new THREE.Group();
     this.coverageGroup = new THREE.Group();
-    this.root.add(this.meshGroup, this.extrusionGroup, this.rayGroup, this.coverageGroup);
+    this.root.add(this.meshGroup, this.extrusionGroup, this.pinGroup, this.rayGroup, this.coverageGroup);
 
     this.scene.add(new THREE.HemisphereLight(0xb9e8df, 0x172326, 1.4));
     const sun = new THREE.DirectionalLight(0xffffff, 1.7);
@@ -38,7 +41,9 @@ export class TerrainScene {
     this.yaw = 0.55;
     this.pitch = 0.72;
     this.distance = 65000;
+    this.cameraTarget = new THREE.Vector3(0, 0, 0);
     this.dragging = false;
+    this.pointerMode = "orbit";
     this.lastPointer = null;
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
@@ -67,6 +72,12 @@ export class TerrainScene {
       lat: (bounds.south + bounds.north) / 2,
     };
     this.verticalScale = options.verticalScale || this.verticalScale;
+    if (this.options.analysis?.surfaceLayers?.dsm) {
+      this.tiles = [];
+      this.rebuildMeshes();
+      this.setStatus("Terrain: analysis DSM surface.");
+      return;
+    }
     const zoom = chooseTerrainZoom(bounds);
     const centerTile = lonLatToTile(this.center.lon, this.center.lat, zoom);
     const jobs = [];
@@ -94,7 +105,7 @@ export class TerrainScene {
 
   updateAnalysis(options) {
     this.options = { ...this.options, ...options };
-    if (this.tiles.length) {
+    if (this.options.analysis?.surfaceLayers?.dsm || this.tiles.length) {
       this.rebuildMeshes();
     }
   }
@@ -129,20 +140,80 @@ export class TerrainScene {
   rebuildMeshes() {
     clearGroup(this.meshGroup);
     clearGroup(this.extrusionGroup);
+    clearGroup(this.pinGroup);
     clearGroup(this.rayGroup);
     clearGroup(this.coverageGroup);
 
     let maxExtent = 2000;
-    this.tiles.forEach((tile) => {
-      const mesh = this.buildTileMesh(tile);
+    const dsm = this.options.analysis?.surfaceLayers?.dsm;
+    if (dsm) {
+      const mesh = this.buildRasterTerrainMesh(dsm);
       this.meshGroup.add(mesh);
       maxExtent = Math.max(maxExtent, mesh.userData.extent || 0);
-    });
+    } else {
+      this.tiles.forEach((tile) => {
+        const mesh = this.buildTileMesh(tile);
+        this.meshGroup.add(mesh);
+        maxExtent = Math.max(maxExtent, mesh.userData.extent || 0);
+      });
+    }
     this.distance = clamp(maxExtent * 1.65, 3500, 180000);
     this.updateCamera();
     this.addExtrusions();
+    this.addPins();
     this.addRays();
     this.addCoveragePlan();
+  }
+
+  buildRasterTerrainMesh(raster) {
+    const positions = [];
+    const colors = [];
+    const indices = [];
+    const rowStep = Math.max(1, Math.ceil(raster.rows / ANALYSIS_MESH_TARGET));
+    const colStep = Math.max(1, Math.ceil(raster.cols / ANALYSIS_MESH_TARGET));
+    const sampleRows = sampleIndices(raster.rows, rowStep);
+    const sampleCols = sampleIndices(raster.cols, colStep);
+    let maxExtent = 0;
+
+    sampleRows.forEach((row) => {
+      sampleCols.forEach((col) => {
+        const lonlat = rasterCellLonLat(raster, row, col);
+        const local = this.localXY(lonlat.lon, lonlat.lat);
+        const raw = raster.values[row * raster.cols + col];
+        const elevation = raw !== null && Number.isFinite(raw) ? raw : raster.min || 0;
+        positions.push(local.x, local.y, elevation * this.verticalScale);
+        const color = this.vertexColor(lonlat.lon, lonlat.lat, elevation);
+        colors.push(color.r, color.g, color.b);
+        maxExtent = Math.max(maxExtent, Math.hypot(local.x, local.y));
+      });
+    });
+
+    const width = sampleCols.length;
+    for (let row = 0; row < sampleRows.length - 1; row += 1) {
+      for (let col = 0; col < sampleCols.length - 1; col += 1) {
+        const a = row * width + col;
+        const b = a + 1;
+        const c = a + width;
+        const d = c + 1;
+        indices.push(a, c, b, b, c, d);
+      }
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
+
+    const material = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      roughness: 0.9,
+      metalness: 0.02,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.userData.extent = maxExtent;
+    return mesh;
   }
 
   buildTileMesh(tile) {
@@ -222,6 +293,9 @@ export class TerrainScene {
   addExtrusions() {
     const analysis = this.options.analysis;
     if (!analysis?.surfaceLayers) return;
+    if (this.options.showCanopy) {
+      this.addCanopyCover(analysis.surfaceLayers.canopyHeight);
+    }
     if (this.options.showBuildings) {
       this.addExtrusionLayer(analysis.surfaceLayers.buildingHeight, {
         threshold: 2,
@@ -229,13 +303,114 @@ export class TerrainScene {
         color: 0x75a7ef,
       });
     }
-    if (this.options.showCanopy) {
-      this.addExtrusionLayer(analysis.surfaceLayers.canopyHeight, {
-        threshold: 5,
-        maxItems: 520,
-        color: 0x78c76c,
+  }
+
+  addCanopyCover(layer) {
+    if (!layer?.values?.length) return;
+    const positions = [];
+    const colors = [];
+    const indices = [];
+    const rowStep = Math.max(1, Math.ceil(layer.rows / 72));
+    const colStep = Math.max(1, Math.ceil(layer.cols / 72));
+    const sampleRows = sampleIndices(layer.rows, rowStep);
+    const sampleCols = sampleIndices(layer.cols, colStep);
+
+    sampleRows.forEach((row) => {
+      sampleCols.forEach((col) => {
+        const lonlat = rasterCellLonLat(layer, row, col);
+        const canopy = layer.values[row * layer.cols + col];
+        const base = this.surfaceHeight(lonlat.lon, lonlat.lat);
+        const height = canopy !== null && Number.isFinite(canopy) ? Math.max(canopy, 0) : 0;
+        positions.push(
+          ...Object.values(this.localXY(lonlat.lon, lonlat.lat)),
+          (base + height + 0.8) * this.verticalScale
+        );
+        const t = clamp(height / Math.max(layer.max || 35, 1), 0, 1);
+        colors.push(0.18 + t * 0.22, 0.38 + t * 0.44, 0.18 + t * 0.16);
       });
+    });
+
+    const width = sampleCols.length;
+    for (let row = 0; row < sampleRows.length - 1; row += 1) {
+      for (let col = 0; col < sampleCols.length - 1; col += 1) {
+        const values = [
+          layer.values[sampleRows[row] * layer.cols + sampleCols[col]],
+          layer.values[sampleRows[row] * layer.cols + sampleCols[col + 1]],
+          layer.values[sampleRows[row + 1] * layer.cols + sampleCols[col]],
+          layer.values[sampleRows[row + 1] * layer.cols + sampleCols[col + 1]],
+        ];
+        if (!values.some((value) => value !== null && Number.isFinite(value) && value > 1.0)) continue;
+        const a = row * width + col;
+        const b = a + 1;
+        const c = a + width;
+        const d = c + 1;
+        indices.push(a, c, b, b, c, d);
+      }
     }
+    if (!indices.length) {
+      this.addCanopyVolumes(layer);
+      return;
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
+    const material = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.44,
+      roughness: 0.96,
+      metalness: 0,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    this.extrusionGroup.add(new THREE.Mesh(geometry, material));
+    this.addCanopyVolumes(layer);
+  }
+
+  addCanopyVolumes(layer) {
+    const stride = Math.max(1, Math.ceil(Math.max(layer.rows, layer.cols) / 44));
+    const candidates = [];
+    for (let row = 0; row < layer.rows; row += stride) {
+      for (let col = 0; col < layer.cols; col += stride) {
+        const value = layer.values[row * layer.cols + col];
+        if (value !== null && Number.isFinite(value) && value > 2.5) {
+          candidates.push({ row, col, value });
+        }
+      }
+    }
+    if (!candidates.length) return;
+    candidates.sort((a, b) => b.value - a.value);
+    const chosen = candidates.slice(0, 900);
+    const geometry = new THREE.CylinderGeometry(0.52, 0.7, 1, 9, 1, true);
+    const material = new THREE.MeshStandardMaterial({
+      color: 0x75c96d,
+      transparent: true,
+      opacity: 0.34,
+      roughness: 0.98,
+      metalness: 0,
+      depthWrite: false,
+    });
+    const mesh = new THREE.InstancedMesh(geometry, material, chosen.length);
+    const matrix = new THREE.Matrix4();
+    const quat = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0));
+    const footprint = Math.max(layer.resX || 30, layer.resY || 30) * stride * 0.72;
+    chosen.forEach((item, index) => {
+      const lonlat = rasterCellLonLat(layer, item.row, item.col);
+      const local = this.localXY(lonlat.lon, lonlat.lat);
+      const base = this.surfaceHeight(lonlat.lon, lonlat.lat) * this.verticalScale;
+      const height = Math.max(item.value * this.verticalScale, 4);
+      matrix.compose(
+        new THREE.Vector3(local.x, local.y, base + height / 2),
+        quat,
+        new THREE.Vector3(footprint, height, footprint)
+      );
+      mesh.setMatrixAt(index, matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    this.extrusionGroup.add(mesh);
   }
 
   addExtrusionLayer(layer, config) {
@@ -288,27 +463,31 @@ export class TerrainScene {
     const sighting = sightings[this.options.selectedSighting];
     if (!sighting) return;
     const start = this.pointVector(sighting.lon, sighting.lat, sighting.altitude || 0);
-    const target = this.options.selectedCell || this.options.analysis?.mostLikely;
+    const dsm = this.options.analysis?.surfaceLayers?.dsm;
+    const ground = this.options.analysis?.surfaceLayers?.bareEarth || dsm;
+    const targetHeight = Number(this.options.targetHeightM) || 1.5;
 
-    if (mode === "fan") {
-      const material = new THREE.LineBasicMaterial({
-        color: 0x55d6c2,
-        transparent: true,
-        opacity: 0.18,
+    if (mode === "fan" && dsm) {
+      const observerZ = observerElevation(dsm, sighting.lat, sighting.lon, sighting.altitude || 0);
+      const fan = castViewshedFan({
+        dsm,
+        ground,
+        origin: { lat: sighting.lat, lon: sighting.lon },
+        observerZ,
+        targetHeight,
+        maxRange: this.options.maxRangeM || 12000,
+        rayCount: 96,
       });
-      const range = this.options.maxRangeM || 12000;
-      const positions = [];
-      for (let i = 0; i < 36; i += 1) {
-        const angle = (i / 36) * Math.PI * 2;
-        positions.push(start.x, start.y, start.z);
-        positions.push(start.x + Math.cos(angle) * range, start.y + Math.sin(angle) * range, 0);
-      }
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-      this.rayGroup.add(new THREE.LineSegments(geometry, material));
+      this.addRayFanGeometry(start, fan, targetHeight);
       return;
     }
 
+    if (mode === "fan") {
+      this.addPreviewFan(start);
+      return;
+    }
+
+    const target = this.options.selectedCell || this.options.analysis?.mostLikely;
     if (target) {
       const end = this.pointVector(target.lon, target.lat, 1.5);
       const material = new THREE.LineBasicMaterial({
@@ -319,6 +498,86 @@ export class TerrainScene {
       const geometry = new THREE.BufferGeometry().setFromPoints([start, end]);
       this.rayGroup.add(new THREE.Line(geometry, material));
     }
+  }
+
+  addRayFanGeometry(start, fan, targetHeight) {
+    const visible = [];
+    const occluded = [];
+    fan.rays.forEach((ray) => {
+      if (!ray.points.length) return;
+      let last = start;
+      ray.points.forEach((point) => {
+        const current = this.pointVector(point.lon, point.lat, targetHeight);
+        const out = point.visible ? visible : occluded;
+        out.push(last.x, last.y, last.z, current.x, current.y, current.z);
+        last = current;
+      });
+    });
+    this.addLineSegments(visible, 0x55d6c2, 0.56);
+    this.addLineSegments(occluded, 0xf0655a, 0.22);
+  }
+
+  addPreviewFan(start) {
+    const range = this.options.maxRangeM || 12000;
+    const positions = [];
+    for (let i = 0; i < 48; i += 1) {
+      const angle = (i / 48) * Math.PI * 2;
+      positions.push(start.x, start.y, start.z);
+      positions.push(start.x + Math.cos(angle) * range, start.y + Math.sin(angle) * range, start.z);
+    }
+    this.addLineSegments(positions, 0x55d6c2, 0.14);
+  }
+
+  addLineSegments(positions, color, opacity) {
+    if (!positions.length) return;
+    const material = new THREE.LineBasicMaterial({ color, transparent: true, opacity });
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    this.rayGroup.add(new THREE.LineSegments(geometry, material));
+  }
+
+  addPins() {
+    if (this.options.analysis?.kind === "coverage") return;
+    if (!this.options.showSightings) return;
+    const sightings = this.options.sightings || [];
+    sightings.forEach((sighting, index) => {
+      if (!Number.isFinite(sighting?.lat) || !Number.isFinite(sighting?.lon)) return;
+      const selected = index === this.options.selectedSighting;
+      const color = selected ? 0x55d6c2 : 0x69a8ff;
+      const base = this.pointVector(sighting.lon, sighting.lat, 0.8);
+      const top = this.pointVector(sighting.lon, sighting.lat, Math.max(sighting.altitude || 0, 2));
+      const marker = new THREE.Mesh(
+        new THREE.SphereGeometry(selected ? 58 : 46, 18, 12),
+        new THREE.MeshStandardMaterial({
+          color,
+          emissive: color,
+          emissiveIntensity: selected ? 0.45 : 0.2,
+          roughness: 0.42,
+        })
+      );
+      marker.position.copy(top);
+      this.pinGroup.add(marker);
+      this.addLineToGroup(this.pinGroup, [base, top], color, selected ? 0.9 : 0.65);
+      this.addUncertaintyRing(sighting, color, selected);
+    });
+  }
+
+  addUncertaintyRing(sighting, color, selected) {
+    const radius = Math.max(Number(sighting.position_sigma_m) || 0, 1);
+    const points = [];
+    for (let i = 0; i <= 96; i += 1) {
+      const angle = (i / 96) * Math.PI * 2;
+      const lonScale = METERS_PER_DEG_LAT * Math.cos((sighting.lat * Math.PI) / 180);
+      const lon = sighting.lon + (Math.cos(angle) * radius) / Math.max(lonScale, 1);
+      const lat = sighting.lat + (Math.sin(angle) * radius) / METERS_PER_DEG_LAT;
+      points.push(this.pointVector(lon, lat, 0.7));
+    }
+    this.addLineToGroup(this.pinGroup, points, color, selected ? 0.7 : 0.34);
+  }
+
+  addLineToGroup(group, points, color, opacity) {
+    const material = new THREE.LineBasicMaterial({ color, transparent: true, opacity });
+    group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), material));
   }
 
   addCoveragePlan() {
@@ -387,8 +646,12 @@ export class TerrainScene {
 
   bindControls() {
     const canvas = this.renderer.domElement;
+    canvas.addEventListener("contextmenu", (event) => event.preventDefault());
     canvas.addEventListener("pointerdown", (event) => {
       this.dragging = true;
+      this.pointerMode = event.button === 1 || event.button === 2 || event.shiftKey || event.ctrlKey
+        ? "pan"
+        : "orbit";
       this.lastPointer = { x: event.clientX, y: event.clientY };
       canvas.setPointerCapture(event.pointerId);
     });
@@ -396,8 +659,17 @@ export class TerrainScene {
       if (!this.dragging || !this.lastPointer) return;
       const dx = event.clientX - this.lastPointer.x;
       const dy = event.clientY - this.lastPointer.y;
-      this.yaw -= dx * 0.006;
-      this.pitch = clamp(this.pitch + dy * 0.004, 0.25, 1.28);
+      if (this.pointerMode === "pan") {
+        const right = new THREE.Vector3();
+        const up = new THREE.Vector3();
+        this.camera.matrix.extractBasis(right, up, new THREE.Vector3());
+        const scale = this.distance / Math.max(this.host.clientHeight, 1);
+        this.cameraTarget.addScaledVector(right, -dx * scale);
+        this.cameraTarget.addScaledVector(up, dy * scale);
+      } else {
+        this.yaw -= dx * 0.006;
+        this.pitch = clamp(this.pitch + dy * 0.004, 0.08, 1.5);
+      }
       this.lastPointer = { x: event.clientX, y: event.clientY };
       this.updateCamera();
     });
@@ -419,6 +691,7 @@ export class TerrainScene {
       },
       { passive: false }
     );
+    canvas.addEventListener("dblclick", () => this.focusSelected());
   }
 
   updateCamera() {
@@ -428,7 +701,59 @@ export class TerrainScene {
       -Math.cos(this.yaw) * flat,
       Math.sin(this.pitch) * this.distance
     );
-    this.camera.lookAt(0, 0, 0);
+    this.camera.position.add(this.cameraTarget);
+    this.camera.lookAt(this.cameraTarget);
+  }
+
+  resetView() {
+    this.yaw = 0.55;
+    this.pitch = 0.72;
+    this.cameraTarget.set(0, 0, 0);
+    this.updateCamera();
+  }
+
+  topView() {
+    this.pitch = 1.5;
+    this.updateCamera();
+  }
+
+  northUp() {
+    this.yaw = 0;
+    this.updateCamera();
+  }
+
+  focusSelected() {
+    const selectedSighting = this.options.sightings?.[this.options.selectedSighting];
+    const point = this.options.analysis?.kind !== "coverage" && selectedSighting
+      ? selectedSighting
+      : this.options.selectedCell
+      || this.options.analysis?.recommendedLaunch
+      || this.options.analysis?.mostLikely
+      || selectedSighting;
+    if (!point) return;
+    this.focusLonLat(point.lon, point.lat);
+  }
+
+  focusLonLat(lon, lat) {
+    const local = this.localXY(lon, lat);
+    this.cameraTarget.set(local.x, local.y, this.surfaceHeight(lon, lat) * this.verticalScale);
+    this.distance = clamp(this.distance * 0.72, 1200, 260000);
+    this.updateCamera();
+  }
+
+  focusBounds(bounds) {
+    if (!bounds) return;
+    const centerLon = (bounds.west + bounds.east) / 2;
+    const centerLat = (bounds.south + bounds.north) / 2;
+    const nw = this.localXY(bounds.west, bounds.north);
+    const se = this.localXY(bounds.east, bounds.south);
+    this.cameraTarget.set(
+      (nw.x + se.x) / 2,
+      (nw.y + se.y) / 2,
+      this.surfaceHeight(centerLon, centerLat) * this.verticalScale
+    );
+    this.distance = clamp(Math.max(Math.abs(se.x - nw.x), Math.abs(nw.y - se.y)) * 1.5, 1200, 260000);
+    this.updateCamera();
   }
 
   resize() {
@@ -522,4 +847,11 @@ function rasterCellLonLat(raster, row, col) {
     lon: b.west + ((col + 0.5) / raster.cols) * (b.east - b.west),
     lat: b.north - ((row + 0.5) / raster.rows) * (b.north - b.south),
   };
+}
+
+function sampleIndices(count, step) {
+  const out = [];
+  for (let i = 0; i < count; i += step) out.push(i);
+  if (out[out.length - 1] !== count - 1) out.push(count - 1);
+  return out;
 }

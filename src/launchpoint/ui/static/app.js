@@ -35,6 +35,7 @@ const state = {
     heatmap: null,
     credible: null,
     diagnostic: null,
+    canopy: null,
     markers: null,
     flightArea: null,
     rays: null,
@@ -44,6 +45,7 @@ const state = {
     probability: true,
     credible: true,
     sightings: true,
+    canopy: false,
   },
   activeView: "map",
   activeDiagnostic: "",
@@ -122,8 +124,13 @@ function cacheElements() {
     "terrainStatus",
     "verticalScaleInput",
     "terrainBuildingsInput",
-    "terrainCanopyInput",
     "reloadTerrainButton",
+    "fitResultButton",
+    "fitPinsButton",
+    "focusSelectedButton",
+    "northButton",
+    "reset3dButton",
+    "top3dButton",
   ].forEach((id) => {
     el[id] = document.getElementById(id);
   });
@@ -200,6 +207,8 @@ function bindEvents() {
   el.fileInput.addEventListener("change", handleImport);
   el.clearButton.addEventListener("click", clearSightings);
   el.runButton.addEventListener("click", runAnalysis);
+  el.maxRangeInput.addEventListener("input", syncTerrainState);
+  el.antennaInput.addEventListener("input", syncTerrainState);
   el.exportTiffButton.addEventListener("click", exportGeotiff);
   el.exportPngButton.addEventListener("click", exportPngPreview);
   el.rayModeSelect.addEventListener("change", () => {
@@ -224,8 +233,13 @@ function bindEvents() {
     state.terrain.setVerticalScale(Number(el.verticalScaleInput.value));
   });
   el.terrainBuildingsInput.addEventListener("change", syncTerrainState);
-  el.terrainCanopyInput.addEventListener("change", syncTerrainState);
   el.reloadTerrainButton.addEventListener("click", loadTerrainForCurrentView);
+  el.fitResultButton.addEventListener("click", fitResult);
+  el.fitPinsButton.addEventListener("click", fitPins);
+  el.focusSelectedButton.addEventListener("click", focusSelected);
+  el.northButton.addEventListener("click", northUp);
+  el.reset3dButton.addEventListener("click", () => state.terrain.resetView());
+  el.top3dButton.addEventListener("click", () => state.terrain.topView());
 
   document.querySelectorAll(".segment").forEach((button) => {
     button.addEventListener("click", () => switchView(button.dataset.view));
@@ -616,6 +630,63 @@ function renderMarkers() {
   state.overlays.markers = group;
 }
 
+function selectedPoint() {
+  if (state.mode === "origin" && state.selectedSighting !== null) {
+    const sighting = state.sightings[state.selectedSighting];
+    if (sighting) return { lat: sighting.lat, lon: sighting.lon };
+  }
+  return state.selectedCell
+    || state.analysis?.recommendedLaunch
+    || state.analysis?.mostLikely
+    || null;
+}
+
+function fitResult() {
+  const raster = state.analysis?.kind === "coverage"
+    ? state.analysis.coverage
+    : state.analysis?.probability;
+  if (raster) {
+    state.map.fitBounds(leafletBounds(raster), { padding: [36, 36] });
+    state.terrain.focusBounds(raster.bounds);
+    return;
+  }
+  if (state.mode === "coverage" && state.flightArea) {
+    const bounds = L.circle(
+      [state.flightArea.center.lat, state.flightArea.center.lon],
+      { radius: state.flightArea.radiusM }
+    ).getBounds();
+    state.map.fitBounds(bounds, { padding: [36, 36] });
+    state.terrain.focusLonLat(state.flightArea.center.lon, state.flightArea.center.lat);
+    return;
+  }
+  fitPins();
+}
+
+function fitPins() {
+  if (state.mode !== "origin") return;
+  const valid = state.sightings.filter(isFiniteSighting);
+  if (!valid.length) return;
+  const bounds = L.latLngBounds(valid.map((sighting) => [sighting.lat, sighting.lon]));
+  state.map.fitBounds(bounds.pad(0.4), { maxZoom: 14 });
+  state.terrain.focusBounds({
+    west: Math.min(...valid.map((sighting) => sighting.lon)),
+    east: Math.max(...valid.map((sighting) => sighting.lon)),
+    south: Math.min(...valid.map((sighting) => sighting.lat)),
+    north: Math.max(...valid.map((sighting) => sighting.lat)),
+  });
+}
+
+function focusSelected() {
+  const point = selectedPoint();
+  if (!point) return;
+  state.map.panTo([point.lat, point.lon]);
+  state.terrain.focusLonLat(point.lon, point.lat);
+}
+
+function northUp() {
+  state.terrain.northUp();
+}
+
 const RAY_VISIBLE_STYLE = { color: "#55d6c2", weight: 1, opacity: 0.5 };
 const RAY_OCCLUDED_STYLE = { color: "#f0655a", weight: 1, opacity: 0.16 };
 
@@ -709,7 +780,7 @@ function drawPreviewFan(group, origin, maxRange) {
 
 function clearRasterOverlays() {
   state.diagnosticRequestId += 1;
-  ["heatmap", "credible", "diagnostic"].forEach((name) => {
+  ["heatmap", "credible", "diagnostic", "canopy"].forEach((name) => {
     if (state.overlays[name]) {
       state.map.removeLayer(state.overlays[name]);
       state.overlays[name] = null;
@@ -734,6 +805,9 @@ async function updateRasterOverlays() {
     ? analysis.surfaceLayers[state.activeDiagnostic]
     : null;
   if (fallbackDiagnostic) renderDiagnosticOverlay(fallbackDiagnostic);
+  if (state.layers.canopy && analysis.surfaceLayers.canopyHeight) {
+    renderCanopyOverlay(analysis.surfaceLayers.canopyHeight);
+  }
 
   if (state.layers.probability && baseRaster) {
     state.overlays.heatmap = L.imageOverlay(
@@ -770,6 +844,18 @@ function renderDiagnosticOverlay(layer) {
     rasterToDataUrl(layer, {
       kind: state.activeDiagnostic,
       opacity: state.diagnosticOpacity,
+      solid: true,
+    }),
+    leafletBounds(layer),
+    { pane: "diagnosticPane", opacity: 1 }
+  ).addTo(state.map);
+}
+
+function renderCanopyOverlay(layer) {
+  state.overlays.canopy = L.imageOverlay(
+    rasterToDataUrl(layer, {
+      kind: "canopyHeight",
+      opacity: 0.55,
       solid: true,
     }),
     leafletBounds(layer),
@@ -1305,9 +1391,11 @@ function loadTerrainForCurrentView() {
     flightArea: state.analysis?.flightArea || state.flightArea,
     rayMode: el.rayModeSelect.value,
     maxRangeM: Number(el.maxRangeInput.value),
+    targetHeightM: Number(el.antennaInput.value),
     showProbability: state.layers.probability,
+    showSightings: state.layers.sightings,
     showBuildings: el.terrainBuildingsInput.checked,
-    showCanopy: el.terrainCanopyInput.checked,
+    showCanopy: state.layers.canopy,
     verticalScale: Number(el.verticalScaleInput.value),
   });
 }
@@ -1322,9 +1410,11 @@ function syncTerrainState() {
     flightArea: state.analysis?.flightArea || state.flightArea,
     rayMode: el.rayModeSelect.value,
     maxRangeM: Number(el.maxRangeInput.value),
+    targetHeightM: Number(el.antennaInput.value),
     showProbability: state.layers.probability,
+    showSightings: state.layers.sightings,
     showBuildings: el.terrainBuildingsInput.checked,
-    showCanopy: el.terrainCanopyInput.checked,
+    showCanopy: state.layers.canopy,
   });
 }
 
@@ -1385,6 +1475,13 @@ async function drawVisiblePreviewLayers(ctx, viewBounds, zoom, canvas) {
     drawRasterInView(ctx, diagnosticLayer, viewBounds, zoom, canvas, {
       kind: state.activeDiagnostic,
       opacity: state.diagnosticOpacity,
+      solid: true,
+    });
+  }
+  if (state.layers.canopy && analysis.surfaceLayers.canopyHeight) {
+    drawRasterInView(ctx, analysis.surfaceLayers.canopyHeight, viewBounds, zoom, canvas, {
+      kind: "canopyHeight",
+      opacity: 0.55,
       solid: true,
     });
   }

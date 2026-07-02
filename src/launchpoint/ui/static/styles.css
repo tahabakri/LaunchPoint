@@ -542,6 +542,7 @@ input[type="range"] {
 
 .segmented,
 .layer-strip,
+.nav-cluster,
 .terrain-toolbar {
   display: flex;
   align-items: center;
@@ -556,7 +557,8 @@ input[type="range"] {
 }
 
 .segmented,
-.layer-strip {
+.layer-strip,
+.nav-cluster {
   padding: 6px;
 }
 
@@ -582,6 +584,15 @@ input[type="range"] {
   width: 132px;
   min-height: 36px;
   font-size: 12px;
+}
+
+.nav-cluster {
+  flex: 0 0 auto;
+}
+
+.nav-cluster .icon-button {
+  width: 36px;
+  flex-basis: 36px;
 }
 
 .stage-view {
@@ -1072,6 +1083,11 @@ input[type="range"] {
   }
 
   .layer-strip {
+    max-width: calc(100vw - 28px);
+    overflow-x: auto;
+  }
+
+  .nav-cluster {
     max-width: calc(100vw - 28px);
     overflow-x: auto;
   }

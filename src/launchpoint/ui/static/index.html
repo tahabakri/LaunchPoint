@@ -196,10 +196,31 @@
             <button class="layer-toggle active" data-layer="probability" type="button">Heatmap</button>
             <button class="layer-toggle active" data-layer="credible" type="button">50%</button>
             <button class="layer-toggle active" data-layer="sightings" type="button">Sightings</button>
+            <button class="layer-toggle" data-layer="canopy" type="button">Canopy</button>
             <select id="rayModeSelect" class="select-control" aria-label="Ray mode">
               <option value="off">Rays off</option>
               <option value="fan">Viewshed rays</option>
             </select>
+          </div>
+          <div class="nav-cluster" aria-label="Navigation controls">
+            <button id="fitResultButton" class="icon-button" type="button" title="Fit result">
+              <i data-lucide="scan"></i>
+            </button>
+            <button id="fitPinsButton" class="icon-button" type="button" title="Fit pins">
+              <i data-lucide="map-pinned"></i>
+            </button>
+            <button id="focusSelectedButton" class="icon-button" type="button" title="Center selected">
+              <i data-lucide="locate-fixed"></i>
+            </button>
+            <button id="northButton" class="icon-button" type="button" title="North">
+              <i data-lucide="navigation"></i>
+            </button>
+            <button id="reset3dButton" class="icon-button" type="button" title="Reset 3D">
+              <i data-lucide="rotate-ccw"></i>
+            </button>
+            <button id="top3dButton" class="icon-button" type="button" title="Top view">
+              <i data-lucide="panel-top"></i>
+            </button>
           </div>
         </div>
 
@@ -222,10 +243,6 @@
             <label class="toggle-line compact">
               <input id="terrainBuildingsInput" type="checkbox" checked />
               <span>Buildings</span>
-            </label>
-            <label class="toggle-line compact">
-              <input id="terrainCanopyInput" type="checkbox" />
-              <span>Canopy</span>
             </label>
             <button id="reloadTerrainButton" class="control-button compact" type="button">
               <i data-lucide="refresh-cw"></i>
