@@ -534,9 +534,11 @@ input[type="range"] {
   left: 14px;
   right: 14px;
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 12px;
+  row-gap: 10px;
   pointer-events: none;
 }
 
@@ -560,6 +562,11 @@ input[type="range"] {
 .layer-strip,
 .nav-cluster {
   padding: 6px;
+}
+
+.layer-strip {
+  flex-wrap: wrap;
+  row-gap: 6px;
 }
 
 .segment {
@@ -588,6 +595,7 @@ input[type="range"] {
 
 .nav-cluster {
   flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .nav-cluster .icon-button {
@@ -1089,6 +1097,7 @@ input[type="range"] {
 
   .nav-cluster {
     max-width: calc(100vw - 28px);
+    margin-left: 0;
     overflow-x: auto;
   }
 
