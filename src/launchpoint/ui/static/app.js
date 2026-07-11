@@ -146,6 +146,8 @@ function initMap() {
     minZoom: 2,
   }).setView([20, 0], 2);
 
+  state.map.zoomControl.setPosition("bottomright");
+
   L.tileLayer(OSM_TEMPLATE, {
     maxZoom: 19,
     attribution: "&copy; OpenStreetMap contributors",

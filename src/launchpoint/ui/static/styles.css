@@ -536,7 +536,7 @@ input[type="range"] {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-start;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 12px;
   row-gap: 10px;
   pointer-events: none;
@@ -595,6 +595,7 @@ input[type="range"] {
 
 .nav-cluster {
   flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .nav-cluster .icon-button {
@@ -1096,6 +1097,7 @@ input[type="range"] {
 
   .nav-cluster {
     max-width: calc(100vw - 28px);
+    margin-left: 0;
     overflow-x: auto;
   }
 
