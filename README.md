@@ -1,7 +1,14 @@
 # LaunchPoint — Controller-Origin Finder
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Python](https://img.shields.io/badge/python-3.10--3.12-blue.svg)
+
 Estimate **where a drone's operator is standing** from one or more ground-position
 sightings of the drone.
+
+![LaunchPoint fusing three drone sightings into a probability heatmap of the operator's location — Zürich example.](docs/img/heatmap.png)
+
+*Three ground sightings of the same drone (pins 1–3) fused into a probability surface for the operator's location — Zürich example, 50% credible region ≈ 12 km². Warmer = more likely.*
 
 The method rests on a simple fact: **line-of-sight is reciprocal.** Every place
 the drone could see is a place from which the controller could see the drone — and
@@ -77,6 +84,25 @@ view decodes keyless Terrarium elevation PNG tiles from the AWS Open Data
 Terrain Tiles bucket and drapes the same probability heatmap palette used by the
 2D viewport and PNG preview. GeoTIFF export is served from the full backend
 probability raster.
+
+![The linked 3D terrain view with the probability heatmap draped over it.](docs/img/terrain-3d.png)
+
+*The linked 3D view drapes the same probability palette over keyless Terrarium elevation tiles — here the high-likelihood plume follows the terrain toward the lake.*
+
+---
+
+## Coverage planner (reverse mode)
+
+The workspace has a second mode. Instead of *finding* an operator from sightings,
+the **Coverage planner** runs the geometry backwards: define a **flight area** —
+draw a circle (centre, radius, mission altitude) over the patch of sky a drone
+will work — and LaunchPoint scores candidate ground sites by how well each keeps
+control-range line-of-sight over that whole area, surfacing the **best launch
+point** and its coverage. It reuses the origin finder's viewshed, curvature, and
+terrain/canopy occlusion model, just pointed the other way: *where should you
+stand to cover this area?* rather than *where is the operator who flew here?*
+
+![Coverage planner mode — draw a flight area, get the best launch site for control coverage over it.](docs/img/coverage-planner.png)
 
 ---
 

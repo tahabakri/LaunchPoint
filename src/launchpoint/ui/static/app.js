@@ -142,6 +142,8 @@ function cacheElements() {
     "northButton",
     "reset3dButton",
     "top3dButton",
+    "mapEmptyState",
+    "mapEmptyStateText",
   ].forEach((id) => {
     el[id] = document.getElementById(id);
   });
@@ -151,11 +153,13 @@ function initMap() {
   state.map = L.map("map", {
     worldCopyJump: true,
     preferCanvas: true,
-    // Zoom control lives top-right so it doesn't collide with the search box.
-    zoomControl: false,
+    zoomControl: true,
     minZoom: 2,
   }).setView([20, 0], 2);
-  L.control.zoom({ position: "topright" }).addTo(state.map);
+
+  // Bottom-right keeps the zoom control clear of the top toolbar and the
+  // top-left location search box.
+  state.map.zoomControl.setPosition("bottomright");
 
   L.tileLayer(OSM_TEMPLATE, {
     maxZoom: 19,
@@ -1507,6 +1511,7 @@ function resetResults() {
 }
 
 function updateRunReadiness() {
+  updateMapEmptyState();
   if (state.mode === "coverage") {
     el.runButton.disabled = !validFlightArea();
     if (!state.flightArea) {
@@ -1525,6 +1530,19 @@ function updateRunReadiness() {
     el.runMessage.textContent = "Check sighting coordinates and altitude values.";
   } else if (!state.analysis) {
     el.runMessage.textContent = statusText();
+  }
+}
+
+function updateMapEmptyState() {
+  if (!el.mapEmptyState) return;
+  const hasInput =
+    state.mode === "coverage" ? Boolean(state.flightArea) : state.sightings.length > 0;
+  el.mapEmptyState.classList.toggle("hidden", hasInput || Boolean(state.analysis));
+  if (el.mapEmptyStateText) {
+    el.mapEmptyStateText.textContent =
+      state.mode === "coverage"
+        ? "Draw a flight area on the map to find the best launch site for its coverage."
+        : "Add a sighting on the map, or import a JSON/CSV file, to estimate the operator's location.";
   }
 }
 
