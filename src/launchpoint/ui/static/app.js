@@ -131,6 +131,8 @@ function cacheElements() {
     "northButton",
     "reset3dButton",
     "top3dButton",
+    "mapEmptyState",
+    "mapEmptyStateText",
   ].forEach((id) => {
     el[id] = document.getElementById(id);
   });
@@ -1296,6 +1298,7 @@ function resetResults() {
 }
 
 function updateRunReadiness() {
+  updateMapEmptyState();
   if (state.mode === "coverage") {
     el.runButton.disabled = !validFlightArea();
     if (!state.flightArea) {
@@ -1314,6 +1317,19 @@ function updateRunReadiness() {
     el.runMessage.textContent = "Check sighting coordinates and altitude values.";
   } else if (!state.analysis) {
     el.runMessage.textContent = statusText();
+  }
+}
+
+function updateMapEmptyState() {
+  if (!el.mapEmptyState) return;
+  const hasInput =
+    state.mode === "coverage" ? Boolean(state.flightArea) : state.sightings.length > 0;
+  el.mapEmptyState.classList.toggle("hidden", hasInput || Boolean(state.analysis));
+  if (el.mapEmptyStateText) {
+    el.mapEmptyStateText.textContent =
+      state.mode === "coverage"
+        ? "Draw a flight area on the map to find the best launch site for its coverage."
+        : "Add a sighting on the map, or import a JSON/CSV file, to estimate the operator's location.";
   }
 }
 
