@@ -10,7 +10,14 @@ readme = "README.md"
 requires-python = ">=3.10,<3.13"
 license = { text = "MIT" }
 authors = [{ name = "Giorgi Samukashvili" }]
-keywords = ["viewshed", "geospatial", "drone", "monte-carlo", "dsm", "line-of-sight"]
+keywords = [
+    "drone", "uav", "counter-drone", "counter-uav", "drone-detection",
+    "geolocation", "operator-localization", "remote-id",
+    "viewshed", "line-of-sight", "raycasting", "monte-carlo",
+    "geospatial", "gis", "dsm", "dem", "elevation", "raster",
+    "copernicus", "openstreetmap", "canopy-height",
+    "cuda", "gpu",
+]
 
 dependencies = [
     "numpy>=1.24",

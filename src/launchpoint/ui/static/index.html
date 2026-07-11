@@ -226,6 +226,26 @@
 
         <section id="mapView" class="stage-view active" aria-label="2D map">
           <div id="map"></div>
+          <div class="map-search" role="search">
+            <div class="map-search-field">
+              <i data-lucide="search" aria-hidden="true"></i>
+              <input
+                id="mapSearchInput"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="Search a place or address..."
+                aria-label="Search for a location"
+                aria-autocomplete="list"
+                aria-controls="mapSearchResults"
+                aria-expanded="false"
+              />
+              <button id="mapSearchClear" class="map-search-clear" type="button" title="Clear search" hidden>
+                <i data-lucide="x"></i>
+              </button>
+            </div>
+            <ul id="mapSearchResults" class="map-search-results" role="listbox" hidden></ul>
+          </div>
           <div class="map-legend" aria-label="Heatmap legend">
             <span>Low</span>
             <div class="legend-ramp"></div>
