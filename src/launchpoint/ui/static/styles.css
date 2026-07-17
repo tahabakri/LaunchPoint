@@ -959,6 +959,19 @@ input[type="range"] {
   font-size: 14px;
 }
 
+/* The card itself is click-through so it never blocks the map, but its own
+   controls must stay interactive. */
+.empty-state button {
+  margin-top: 6px;
+  pointer-events: auto;
+}
+
+/* .control-button sets display:inline-flex, which would override the plain
+   [hidden] attribute — restore hiding for the mode-gated example button. */
+.empty-state button[hidden] {
+  display: none;
+}
+
 .empty-state.hidden {
   display: none;
 }

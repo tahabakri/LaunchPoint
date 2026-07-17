@@ -144,6 +144,7 @@ function cacheElements() {
     "top3dButton",
     "mapEmptyState",
     "mapEmptyStateText",
+    "loadExampleButton",
   ].forEach((id) => {
     el[id] = document.getElementById(id);
   });
@@ -221,6 +222,7 @@ function bindEvents() {
     }
   });
   el.importButton.addEventListener("click", () => el.fileInput.click());
+  el.loadExampleButton?.addEventListener("click", loadExampleSightings);
   el.fileInput.addEventListener("change", handleImport);
   el.clearButton.addEventListener("click", clearSightings);
   el.runButton.addEventListener("click", runAnalysis);
@@ -397,6 +399,23 @@ function normalizeSighting(raw, index) {
     position_sigma_m: Number(raw.position_sigma_m ?? raw.position_uncertainty_m ?? 250),
     altitude_sigma_m: Number(raw.altitude_sigma_m ?? raw.altitude_uncertainty_m ?? 30),
   };
+}
+
+// Mirrors examples/sightings_zurich.json so a first-time visitor can see a real
+// result without having to find input data first.
+const EXAMPLE_SIGHTINGS = [
+  { label: "north pass", lat: 47.3905, lon: 8.551, altitude: 110, position_sigma_m: 200, altitude_sigma_m: 25 },
+  { label: "east pass", lat: 47.3802, lon: 8.572, altitude: 95, position_sigma_m: 250, altitude_sigma_m: 30 },
+  { label: "south pass", lat: 47.3701, lon: 8.5505, altitude: 130, position_sigma_m: 220, altitude_sigma_m: 25 },
+];
+
+function loadExampleSightings() {
+  state.sightings = EXAMPLE_SIGHTINGS.map(normalizeSighting);
+  state.selectedSighting = 0;
+  renderSightings();
+  renderMarkers();
+  fitSightings();
+  updateRunReadiness();
 }
 
 function renderSightings() {
@@ -1544,6 +1563,8 @@ function updateMapEmptyState() {
         ? "Draw a flight area on the map to find the best launch site for its coverage."
         : "Add a sighting on the map, or import a JSON/CSV file, to estimate the operator's location.";
   }
+  // The bundled example is a set of sightings, so it only applies to the origin finder.
+  if (el.loadExampleButton) el.loadExampleButton.hidden = state.mode === "coverage";
 }
 
 function statusText() {
